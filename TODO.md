@@ -147,7 +147,7 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - 新增单元测试覆盖 tool-use block start 与 message delta 的 serde 形状。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M1-04 `[TODO]` 定义 provider capability profile trait (`provider/mod.rs`)
+### [DONE] M1-04 定义 provider capability profile trait (`provider/mod.rs`)
 定义 `trait CapabilityProfile`，方法覆盖 DESIGN §5 的能力：
 - `fn param_blocklist(&self, model:&str) -> &[&str]`（静默 drop 的参数名）
 - `fn normalize_reasoning_effort(&self, effort:&str) -> &str`
@@ -156,6 +156,12 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - `fn base_url(&self) -> &str` / `fn map_model_name(&self, requested:&str) -> String`
 - `fn thinking_model(&self, model:&str) -> bool`
 提供一个 `GenericOpenAi` 默认实现（无 blocklist、echo=Never）。
+
+完成记录：
+- 2026-07-06：已在 `src/provider/mod.rs` 定义 `CapabilityProfile`，覆盖参数 blocklist、reasoning effort 归一、reasoning echo policy、多 choice 支持、base URL、模型名映射与 thinking-model 检测能力。
+- 已实现 `GenericOpenAi` 默认 profile：无 blocklist、reasoning effort 原样保留、`EchoPolicy::Never`、支持 `n>1`、默认 OpenAI Chat base URL、模型名原样映射、默认无 thinking model；同时支持自定义 base URL。
+- 新增单元测试覆盖 `GenericOpenAi` 中性默认行为与自定义 base URL。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M1-05 `[TODO]` 实现 DeepSeek profile (`provider/deepseek.rs`)
 实现 `CapabilityProfile`，严格按 DESIGN §5：

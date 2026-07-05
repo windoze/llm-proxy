@@ -12,20 +12,22 @@ I will complete exactly the first incomplete task listed in `TODO.md`, using `TO
 
 ## Current Task
 
-First incomplete task identified: `M1-03` — define streaming IR event types in `src/ir/event.rs`.
+First incomplete task identified: `M1-04` — define the provider capability profile trait in `src/provider/mod.rs`.
 
 Execution steps for this task:
 
-1. Inspect existing IR modules to match naming, serde, dead-code allowances, and test conventions.
-2. Implement `IrEvent` and `BlockKind` in `src/ir/event.rs` with the variants required by `TODO.md`.
-3. Ensure the IR module exports or wires the new event definitions consistently with existing staged modules.
-4. Add focused tests if existing IR modules include serde shape tests for staged types.
+1. Inspect the existing provider module, IR message types, and DESIGN §5 to match naming and capability semantics.
+2. Define `CapabilityProfile` with the required methods for parameter blocking, reasoning effort normalization, reasoning echo policy, multiple choice support, base URL, model mapping, and thinking-model detection.
+3. Add a `GenericOpenAi` default implementation with no parameter blocklist, `EchoPolicy::Never`, support for multiple choices, identity model mapping, and no thinking-model behavior unless existing design text requires otherwise.
+4. Add focused tests for the trait defaults and owned model-name mapping behavior.
 5. Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. Mark `M1-03` as `[DONE]` in `TODO.md`, add a completion record, and commit the task changes.
+6. Mark `M1-04` as `[DONE]` in `TODO.md`, add a completion record, commit the task changes, and stop.
 
 ## Progress
 
-- Implemented `IrEvent` and `BlockKind` in `src/ir/event.rs` with serde support and focused serialization tests.
+- Selected `M1-04` as the first incomplete task.
+- Latest commit completed `M1-03`; no unfinished issue from that commit needs to preempt `M1-04`.
+- Implemented `CapabilityProfile` and `GenericOpenAi` in `src/provider/mod.rs` with focused unit tests for neutral defaults and custom base URLs.
 - Completed validation with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked `M1-03` as `[DONE]` in `TODO.md` with a completion record.
-- Next step: review the final diff and commit the task changes.
+- Marked `M1-04` as `[DONE]` in `TODO.md` with a completion record.
+- Next step: commit the task changes and stop.
