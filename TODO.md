@@ -219,9 +219,16 @@ echo_policy 在有/无 tool_calls 场景符合 §4.1。用 `insta` 做快照。
 - 已用 `insta::assert_snapshot!` 生成并提交两个 JSON 快照：带 tool_calls 和不带 tool_calls 的 DeepSeek 响应 IR。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`INSTA_UPDATE=always cargo test --all --all-targets`、`cargo test --all --all-targets` 均通过。
 
-### M1-RV `[TODO]` 【Review】M1 IR 与解析
+### [DONE] M1-RV 【Review】M1 IR 与解析
 确认：IR 类型覆盖 DESIGN §2.1/§4.2 全部块类型；DeepSeek profile 规则与 §5 逐条一致；
 解析测试通过；`reasoning_content` echo_policy 逻辑正确。检查是否有硬编码应进 profile 的东西。记录偏差。
+
+完成记录：
+- 2026-07-06：已复核 M1 IR：`ContentBlock` 覆盖 `text` / `image` / `tool_use` / `tool_result` / `thinking`，`Thinking` 包含 `text`、`opaque`、`source`、`echo_policy`，与 DESIGN §2.1/§4.2 一致。
+- 已复核 DeepSeek `CapabilityProfile`：参数 blocklist、`reasoning_effort` 归一、`OnlyWithToolCall` echo policy、禁用 `n>1`、`deepseek-reasoner` thinking 判定与 base URL 均与 DESIGN §5 一致。
+- 已复核 OpenAI Chat/DeepSeek decoder 测试与快照：请求/响应解析覆盖 `reasoning_content`、tool_calls/tool_result、cache usage、DeepSeek 参数 drop 与 `n>1` 拒绝；DeepSeek `reasoning_content` 使用 `EchoPolicy::OnlyWithToolCall`，符合 DESIGN §4.1 的有 tool_calls 必须回传、无 tool_calls 可丢弃语义。
+- 偏差记录：未发现 M1 当前阶段与 DESIGN/TODO 要求不一致的偏差；未发现需要从 M1 decoder 迁移到 profile 的额外硬编码。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ---
 
