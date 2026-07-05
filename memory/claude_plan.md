@@ -1,18 +1,22 @@
 ## Current Task
 
-Selected first incomplete task: `M3-01` — Responses request parsing in `protocol/responses/decode.rs`.
+Selected first incomplete task: `M3-02` — Responses non-streaming response encoding in `protocol/responses/encode.rs`.
+
+## Execution Plan
+
+1. [DONE] Inspect existing IR response/content types and nearby encoders, especially Anthropic and OpenAI Chat response encoders, to match project conventions.
+2. [DONE] Review relevant DESIGN/PLAN notes for Responses response shape, stop reason mapping, reasoning items, function calls, and usage fields.
+3. [DONE] Implement `ir_response_to_responses(resp: &IrResponse) -> Value` and expose it from `protocol::responses`.
+4. [DONE] Add focused unit tests covering text, reasoning, function calls, stop/status mapping, and usage serialization.
+5. [DONE] Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. [DONE] Mark `M3-02` as `[DONE]` in `TODO.md` with a completion record.
+7. [IN PROGRESS] Review the final diff, commit the task changes with the required co-author trailer, and stop.
 
 ## Progress
 
-- Confirmed the latest commit completed M2-RV and found no task-relevant unfinished prerequisite.
-- Implemented `responses_request_to_ir` and exposed `protocol::responses::decode`.
-- Added unit tests for Codex-style input messages, reasoning `encrypted_content`, function call/output items, tool definitions, tool choice modes, system/developer hoisting, and invalid inputs.
+- Implemented `src/protocol/responses/encode.rs` with Responses response object, output item encoding, status/incomplete mapping, reasoning `encrypted_content` preservation, function calls, tool outputs, and usage serialization.
+- Exposed `protocol::responses::encode` from `src/protocol/responses/mod.rs`.
 - Ran `cargo fmt --all`.
 - Ran `cargo clippy --all-targets -- -D warnings`.
 - Ran `cargo test --all --all-targets`.
-- Marked `M3-01` as `[DONE]` in `TODO.md` with a completion record.
-
-## Remaining Plan
-
-1. Review the final git diff for only task-relevant changes.
-2. Commit all relevant changes with a descriptive message and required co-author trailer, then stop.
+- Marked `M3-02` as `[DONE]` in `TODO.md` with a completion record.

@@ -376,11 +376,19 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 新增单元测试覆盖 Codex-style message/content、reasoning 保真、function call/output、工具定义与选择、system/developer hoist、字符串 input，以及无效 function arguments / 缺少 `encrypted_content` 的错误路径。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M3-02 `[TODO]` Responses 非流式响应编码 (`protocol/responses/encode.rs`)
+### [DONE] M3-02 Responses 非流式响应编码 (`protocol/responses/encode.rs`)
 实现 `ir_response_to_responses(resp:&IrResponse) -> Value`：
 构造 `response` 对象 + `output` 数组（`message` item 含 `output_text`；`function_call` item；
 `reasoning` item）；`status`、`usage`（`input_tokens`/`output_tokens`）；stop 映射。
 符合 Responses API 响应结构。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/responses/encode.rs` 并从 `protocol::responses` 暴露 encoder。
+- 已实现 `ir_response_to_responses`，输出 Responses `response` 对象，包含 `object=response`、动态 `created_at`、`status`/`incomplete_details`、`output`、无状态 `store=false`、`previous_response_id=null`、并行工具调用标记与 usage。
+- 已覆盖 IR `Text` → `message`/`output_text`、`Thinking` → `reasoning`（保留 `encrypted_content` 且避免 `status=null`）、`ToolUse` → `function_call`，并为完整 IR 覆盖支持 `ToolResult` → `function_call_output`。
+- 已将 `StopReason` 映射到 Responses 状态：正常结束、stop sequence、tool use 为 `completed`，max tokens 与其他上游停止原因映射为 `incomplete` 并写入 `incomplete_details.reason`；usage 输出 `input_tokens`、`output_tokens`、cache read details 与 `total_tokens`。
+- 新增单元测试覆盖 reasoning/text/function_call/usage 编码、连续文本合并、无 `encrypted_content` reasoning、stop/status 映射与 tool result 编码。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M3-03 `[TODO]` IR event → Responses SSE 编码 (`protocol/responses/stream.rs`) 🔒
 实现 `IrEvent` 流 → Responses SSE：
