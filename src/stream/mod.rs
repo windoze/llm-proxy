@@ -2,6 +2,7 @@
 //!
 //! SSE parsing is available in `sse`; protocol-specific state machines convert provider streams into IR events.
 
+pub mod anthropic_decoder;
 pub mod chat_decoder;
 pub mod responses_decoder;
 pub mod sse;

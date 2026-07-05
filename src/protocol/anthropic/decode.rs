@@ -9,7 +9,7 @@ use crate::{
     error::{ProxyError, Result},
     ir::{
         message::{ContentBlock, EchoPolicy, ImageSource, Message, Provider, Role, Thinking},
-        request::{IrRequest, ToolChoice, ToolDef},
+        request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
     reasoning::envelope::{is_wrapped_signature, unwrap_from_signature},
 };
@@ -54,6 +54,35 @@ pub fn anthropic_request_to_ir(body: &Value) -> Result<IrRequest> {
         stop: decode_stop_sequences(request.get("stop_sequences"))?,
         stream: optional_bool(request, "stream", "request.stream")?.unwrap_or(false),
         extra: collect_extra(request),
+    })
+}
+
+/// Converts a non-streaming Anthropic Messages response body into the provider-neutral IR.
+pub fn anthropic_response_to_ir(body: &Value) -> Result<IrResponse> {
+    let response = body
+        .as_object()
+        .ok_or_else(|| mapping_error("response body must be a JSON object"))?;
+    let response_type = required_string(response, "type", "response.type")?;
+    if response_type != "message" {
+        return Err(ProxyError::UnsupportedFeature {
+            feature: format!("response type `{response_type}`"),
+            protocol: PROTOCOL.to_owned(),
+        });
+    }
+    let role = required_string(response, "role", "response.role")?;
+    if role != "assistant" {
+        return Err(ProxyError::UnsupportedFeature {
+            feature: format!("response role `{role}`"),
+            protocol: PROTOCOL.to_owned(),
+        });
+    }
+
+    Ok(IrResponse {
+        id: required_string(response, "id", "response.id")?.to_owned(),
+        model: required_string(response, "model", "response.model")?.to_owned(),
+        content: decode_required_content(response.get("content"), "response.content")?,
+        stop_reason: decode_response_stop_reason(response.get("stop_reason"))?,
+        usage: decode_response_usage(response.get("usage"), "response.usage")?,
     })
 }
 
@@ -291,6 +320,47 @@ fn decode_stop_sequences(value: Option<&Value>) -> Result<Vec<String>> {
     }
 }
 
+fn decode_response_stop_reason(value: Option<&Value>) -> Result<StopReason> {
+    let reason = match value {
+        Some(Value::String(reason)) => reason.as_str(),
+        Some(Value::Null) | None => {
+            return Err(mapping_error("response.stop_reason is required"));
+        }
+        Some(_) => return Err(mapping_error("response.stop_reason must be a string")),
+    };
+
+    Ok(match reason {
+        "end_turn" => StopReason::EndTurn,
+        "max_tokens" => StopReason::MaxTokens,
+        "stop_sequence" => StopReason::StopSequence,
+        "tool_use" => StopReason::ToolUse,
+        other => StopReason::Other(other.to_owned()),
+    })
+}
+
+fn decode_response_usage(value: Option<&Value>, path: &str) -> Result<Usage> {
+    let usage = match value {
+        Some(Value::Object(usage)) => usage,
+        Some(Value::Null) | None => return Err(mapping_error(format!("{path} is required"))),
+        Some(_) => return Err(mapping_error(format!("{path} must be an object"))),
+    };
+
+    Ok(Usage {
+        input_tokens: required_u32(usage, "input_tokens", format!("{path}.input_tokens"))?,
+        output_tokens: required_u32(usage, "output_tokens", format!("{path}.output_tokens"))?,
+        cache_read: optional_u32(
+            usage,
+            "cache_read_input_tokens",
+            format!("{path}.cache_read_input_tokens"),
+        )?,
+        cache_write: optional_u32(
+            usage,
+            "cache_creation_input_tokens",
+            format!("{path}.cache_creation_input_tokens"),
+        )?,
+    })
+}
+
 fn collect_extra(request: &Map<String, Value>) -> Map<String, Value> {
     request
         .iter()
@@ -317,6 +387,12 @@ fn optional_u32(
         Some(Value::Null) | None => Ok(None),
         Some(_) => Err(mapping_error(format!("{path} must be an unsigned integer"))),
     }
+}
+
+fn required_u32(object: &Map<String, Value>, field: &str, path: impl Into<String>) -> Result<u32> {
+    let path = path.into();
+    optional_u32(object, field, path.clone())
+        .and_then(|value| value.ok_or_else(|| mapping_error(format!("{path} is required"))))
 }
 
 fn optional_f32(
@@ -533,6 +609,100 @@ mod tests {
         assert_eq!(
             request.extra,
             Map::from_iter([("metadata".to_owned(), json!({ "user_id": "u_1" }))])
+        );
+    }
+
+    #[test]
+    fn decodes_anthropic_response_thinking_signature_to_ir() {
+        let body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "I should call the weather tool.",
+                    "signature": "sig_anthropic"
+                },
+                {
+                    "type": "text",
+                    "text": "Calling the weather tool."
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "lookup_weather",
+                    "input": { "city": "Paris" }
+                }
+            ],
+            "stop_reason": "tool_use",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 42,
+                "output_tokens": 9,
+                "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 3
+            }
+        });
+
+        let response = anthropic_response_to_ir(&body).unwrap();
+
+        assert_eq!(response.id, "msg_1");
+        assert_eq!(response.model, "claude-sonnet-4-5");
+        assert_eq!(response.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            response.usage,
+            Usage {
+                input_tokens: 42,
+                output_tokens: 9,
+                cache_read: Some(10),
+                cache_write: Some(3),
+            }
+        );
+        assert_eq!(
+            response.content,
+            vec![
+                ContentBlock::Thinking(Thinking {
+                    text: Some("I should call the weather tool.".to_owned()),
+                    opaque: Some(b"sig_anthropic".to_vec()),
+                    source: Provider::Anthropic,
+                    echo_policy: EchoPolicy::Always,
+                }),
+                ContentBlock::Text {
+                    text: "Calling the weather tool.".to_owned(),
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".to_owned(),
+                    name: "lookup_weather".to_owned(),
+                    input: json!({ "city": "Paris" }),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_anthropic_response_thinking_without_signature() {
+        let body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{
+                "type": "thinking",
+                "thinking": "I need to reason."
+            }],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2
+            }
+        });
+
+        let error = anthropic_response_to_ir(&body).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message == "response.content[0].signature is required")
         );
     }
 
