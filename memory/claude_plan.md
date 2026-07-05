@@ -10,4 +10,4 @@ Current task: `M2-02` Anthropic non-streaming response encoding in `protocol/ant
 4. [DONE] Add focused unit tests for text/tool/thinking blocks, stop reasons, usage cache fields, and provider-specific edge behavior required by the task.
 5. [DONE] Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
 6. [DONE] Mark `M2-02` `[DONE]` in `TODO.md` and update its completion record.
-7. [IN_PROGRESS] Commit all resulting changes with a descriptive `M2-02` message and stop.
+7. [DONE] Commit all resulting changes with a descriptive `M2-02` message and stop.
