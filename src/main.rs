@@ -1,7 +1,5 @@
 //! HTTP server entry point for the proxy.
 
-use std::env;
-
 use anyhow::Context;
 use axum::{
     Json, Router,
@@ -53,21 +51,18 @@ mod provider;
 mod reasoning;
 mod stream;
 
-const DEFAULT_ADDR: &str = "127.0.0.1:8080";
-const PASSTHROUGH_UPSTREAM_URL_ENV: &str = "LLM_PROXY_UPSTREAM_URL";
-const CHAT_COMPLETIONS_URL_ENV: &str = "LLM_PROXY_CHAT_COMPLETIONS_URL";
-const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
-const OPENAI_API_ENDPOINT_ENV: &str = "OPENAI_API_ENDPOINT";
-const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
-const ANTHROPIC_MESSAGES_BACKEND_ENV: &str = "LLM_PROXY_ANTHROPIC_MESSAGES_BACKEND";
-const RESPONSES_BACKEND_ENV: &str = "LLM_PROXY_RESPONSES_BACKEND";
-const ANTHROPIC_BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
-const ANTHROPIC_AUTH_TOKEN_ENV: &str = "ANTHROPIC_AUTH_TOKEN";
-const ANTHROPIC_VERSION_ENV: &str = "ANTHROPIC_VERSION";
-const ANTHROPIC_DEFAULT_OPUS_MODEL_ENV: &str = "ANTHROPIC_DEFAULT_OPUS_MODEL";
-const ANTHROPIC_DEFAULT_MAX_TOKENS_ENV: &str = "LLM_PROXY_ANTHROPIC_DEFAULT_MAX_TOKENS";
-const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 4096;
+const PASSTHROUGH_UPSTREAM_URL_ENV: &str = config::PASSTHROUGH_UPSTREAM_URL_ENV;
+const CHAT_COMPLETIONS_URL_ENV: &str = config::CHAT_COMPLETIONS_URL_ENV;
+const DEEPSEEK_API_KEY_ENV: &str = config::DEEPSEEK_API_KEY_ENV;
+const OPENAI_API_ENDPOINT_ENV: &str = config::OPENAI_API_ENDPOINT_ENV;
+const OPENAI_API_KEY_ENV: &str = config::OPENAI_API_KEY_ENV;
+const ANTHROPIC_MESSAGES_BACKEND_ENV: &str = config::ANTHROPIC_MESSAGES_BACKEND_ENV;
+const RESPONSES_BACKEND_ENV: &str = config::RESPONSES_BACKEND_ENV;
+const ANTHROPIC_BASE_URL_ENV: &str = config::ANTHROPIC_BASE_URL_ENV;
+const ANTHROPIC_AUTH_TOKEN_ENV: &str = config::ANTHROPIC_AUTH_TOKEN_ENV;
+#[cfg(test)]
+const DEFAULT_ANTHROPIC_VERSION: &str = config::DEFAULT_ANTHROPIC_VERSION;
+const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = config::DEFAULT_ANTHROPIC_MAX_TOKENS;
 
 /// Shared HTTP clients and runtime configuration used by request handlers.
 #[derive(Clone)]
@@ -84,47 +79,55 @@ struct AppState {
     anthropic_auth_token: Option<String>,
     anthropic_version: String,
     anthropic_default_model: Option<String>,
-    anthropic_default_max_tokens: Option<String>,
+    anthropic_default_max_tokens: Option<u32>,
+    anthropic_cache_control: AnthropicCacheControlInjection,
 }
 
 impl AppState {
-    fn from_env() -> Self {
+    fn from_config(config: config::Config) -> Self {
         let deepseek = DeepSeek;
+        let chat_backend = config
+            .backend("deepseek")
+            .filter(|backend| backend.kind == Some(config::BackendKind::Chat))
+            .or_else(|| config.first_backend_of_kind(config::BackendKind::Chat));
+        let responses_backend = config
+            .backend("responses")
+            .filter(|backend| backend.kind == Some(config::BackendKind::Responses))
+            .or_else(|| config.first_backend_of_kind(config::BackendKind::Responses));
+        let anthropic_backend = config
+            .backend("anthropic")
+            .filter(|backend| backend.kind == Some(config::BackendKind::Anthropic))
+            .or_else(|| config.first_backend_of_kind(config::BackendKind::Anthropic));
+        let anthropic_cache_control = if config.switches.anthropic_cache_injection {
+            AnthropicCacheControlInjection::EphemeralBreakpoints
+        } else {
+            AnthropicCacheControlInjection::Disabled
+        };
 
         Self {
             http_client: reqwest::Client::new(),
-            passthrough_upstream_url: env::var(PASSTHROUGH_UPSTREAM_URL_ENV).ok(),
-            chat_completions_url: env::var(CHAT_COMPLETIONS_URL_ENV)
-                .unwrap_or_else(|_| default_chat_completions_url(&deepseek)),
-            chat_api_key: env::var(DEEPSEEK_API_KEY_ENV)
-                .ok()
-                .filter(|key| !key.trim().is_empty()),
-            responses_endpoint: env::var(OPENAI_API_ENDPOINT_ENV)
-                .ok()
-                .filter(|endpoint| !endpoint.trim().is_empty()),
-            responses_api_key: env::var(OPENAI_API_KEY_ENV)
-                .ok()
-                .filter(|key| !key.trim().is_empty()),
-            anthropic_messages_backend: env::var(ANTHROPIC_MESSAGES_BACKEND_ENV)
-                .ok()
-                .filter(|backend| !backend.trim().is_empty()),
-            responses_backend: env::var(RESPONSES_BACKEND_ENV)
-                .ok()
-                .filter(|backend| !backend.trim().is_empty()),
-            anthropic_base_url: env::var(ANTHROPIC_BASE_URL_ENV)
-                .ok()
-                .filter(|endpoint| !endpoint.trim().is_empty()),
-            anthropic_auth_token: env::var(ANTHROPIC_AUTH_TOKEN_ENV)
-                .ok()
-                .filter(|key| !key.trim().is_empty()),
-            anthropic_version: env::var(ANTHROPIC_VERSION_ENV)
-                .ok()
-                .filter(|version| !version.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_ANTHROPIC_VERSION.to_owned()),
-            anthropic_default_model: env::var(ANTHROPIC_DEFAULT_OPUS_MODEL_ENV)
-                .ok()
-                .filter(|model| !model.trim().is_empty()),
-            anthropic_default_max_tokens: env::var(ANTHROPIC_DEFAULT_MAX_TOKENS_ENV).ok(),
+            passthrough_upstream_url: config.passthrough_upstream_url.clone(),
+            chat_completions_url: chat_backend
+                .and_then(config::BackendConfig::chat_completions_url)
+                .unwrap_or_else(|| default_chat_completions_url(&deepseek)),
+            chat_api_key: chat_backend.and_then(|backend| backend.api_key.clone()),
+            responses_endpoint: responses_backend
+                .and_then(config::BackendConfig::responses_endpoint),
+            responses_api_key: responses_backend.and_then(|backend| backend.api_key.clone()),
+            anthropic_messages_backend: config.routing.anthropic_messages_backend.clone(),
+            responses_backend: config.routing.responses_backend.clone(),
+            anthropic_base_url: anthropic_backend
+                .and_then(config::BackendConfig::anthropic_endpoint_base),
+            anthropic_auth_token: anthropic_backend.and_then(|backend| backend.api_key.clone()),
+            anthropic_version: anthropic_backend
+                .and_then(|backend| backend.anthropic_version.clone())
+                .unwrap_or_else(|| config::DEFAULT_ANTHROPIC_VERSION.to_owned()),
+            anthropic_default_model: anthropic_backend
+                .and_then(|backend| backend.default_model.clone()),
+            anthropic_default_max_tokens: config
+                .anthropic_default_max_tokens
+                .or_else(|| anthropic_backend.and_then(|backend| backend.default_max_tokens)),
+            anthropic_cache_control,
         }
     }
 }
@@ -152,26 +155,26 @@ struct HealthResponse {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let configured_addr = env::var("LLM_PROXY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
-    let listener = TcpListener::bind(&configured_addr)
-        .await
-        .with_context(|| format!("failed to bind LLM_PROXY_ADDR `{configured_addr}`"))?;
+    let config = config::Config::load().context("failed to load proxy configuration")?;
+    let configured_addr = config.listen_addr.clone();
+    let state = AppState::from_config(config);
+    let listener = TcpListener::bind(&configured_addr).await.with_context(|| {
+        format!(
+            "failed to bind {} `{configured_addr}`",
+            config::LISTEN_ADDR_ENV
+        )
+    })?;
     let local_addr = listener
         .local_addr()
         .context("failed to read bound listener address")?;
 
     info!(%local_addr, %configured_addr, "starting llm-proxy");
 
-    axum::serve(listener, app())
+    axum::serve(listener, app_with_state(state))
         .await
         .context("axum server failed")?;
 
     Ok(())
-}
-
-/// Builds the router shared by the binary and route tests.
-fn app() -> Router {
-    app_with_state(AppState::from_env())
 }
 
 /// Builds the router with explicit state for tests and future configuration loading.
@@ -452,20 +455,9 @@ fn apply_anthropic_defaults(
 }
 
 fn default_anthropic_max_tokens(state: &AppState) -> error::Result<u32> {
-    let Some(configured) = &state.anthropic_default_max_tokens else {
-        return Ok(DEFAULT_ANTHROPIC_MAX_TOKENS);
-    };
-    let value = configured.parse::<u32>().map_err(|err| {
-        error::ProxyError::Config(format!(
-            "invalid {ANTHROPIC_DEFAULT_MAX_TOKENS_ENV} `{configured}`: {err}"
-        ))
-    })?;
-    if value == 0 {
-        return Err(error::ProxyError::Config(format!(
-            "{ANTHROPIC_DEFAULT_MAX_TOKENS_ENV} must be greater than zero"
-        )));
-    }
-    Ok(value)
+    Ok(state
+        .anthropic_default_max_tokens
+        .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS))
 }
 
 fn select_anthropic_messages_backend(
@@ -603,7 +595,7 @@ fn anthropic_backend_client(state: &AppState) -> error::Result<AnthropicBackendC
         api_key,
         &state.anthropic_version,
     )?
-    .with_cache_control_injection(AnthropicCacheControlInjection::EphemeralBreakpoints))
+    .with_cache_control_injection(state.anthropic_cache_control))
 }
 
 /// Converts an Anthropic base URL into the concrete Messages API endpoint.
@@ -724,13 +716,14 @@ mod tests {
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
             anthropic_default_model: None,
             anthropic_default_max_tokens: None,
+            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
         })
     }
 
     fn test_app_with_chat_backend(
         chat_completions_url: String,
         chat_api_key: Option<&str>,
-        anthropic_default_max_tokens: Option<&str>,
+        anthropic_default_max_tokens: Option<u32>,
     ) -> Router {
         app_with_state(AppState {
             http_client: reqwest::Client::new(),
@@ -745,7 +738,8 @@ mod tests {
             anthropic_auth_token: None,
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
             anthropic_default_model: None,
-            anthropic_default_max_tokens: anthropic_default_max_tokens.map(ToOwned::to_owned),
+            anthropic_default_max_tokens,
+            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
         })
     }
 
@@ -768,6 +762,7 @@ mod tests {
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
             anthropic_default_model: None,
             anthropic_default_max_tokens: None,
+            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
         })
     }
 
@@ -791,6 +786,7 @@ mod tests {
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
             anthropic_default_model: anthropic_default_model.map(ToOwned::to_owned),
             anthropic_default_max_tokens: None,
+            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
         })
     }
 
@@ -1082,7 +1078,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_route_returns_ok_json() {
-        let response = app()
+        let response = test_app(None)
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -2690,6 +2686,7 @@ mod tests {
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
             anthropic_default_model: None,
             anthropic_default_max_tokens: None,
+            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
         };
         let mut headers = HeaderMap::new();
         headers.insert(

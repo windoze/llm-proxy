@@ -706,10 +706,17 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 
 ## M7 — 加固与运维
 
-### M7-01 `[TODO]` 配置系统 (`config.rs`)
+### [DONE] M7-01 配置系统 (`config.rs`)
 实现配置加载（文件 TOML/YAML + 环境变量覆盖）：后端列表（类型/base_url/凭据/profile）、
 模型别名映射（client model 名 → 后端 + 改名，DESIGN §6.6）、监听地址、开关（cache 注入、reasoning store）。
 用 `serde` 反序列化为强类型 `Config`。启动时校验。
+
+完成记录：
+- 2026-07-06：已在 `src/config.rs` 实现强类型 `Config`，支持从 `LLM_PROXY_CONFIG` 指向的 TOML/YAML 文件加载 listen 地址、后端列表、模型别名、临时路由覆盖以及 cache 注入/reasoning store 开关。
+- 已实现环境变量覆盖：保留既有 `LLM_PROXY_ADDR`、`LLM_PROXY_UPSTREAM_URL`、`DEEPSEEK_API_KEY`、`LLM_PROXY_CHAT_COMPLETIONS_URL`、`OPENAI_API_ENDPOINT`/`OPENAI_API_KEY`、`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_VERSION`、`ANTHROPIC_DEFAULT_OPUS_MODEL`、`LLM_PROXY_ANTHROPIC_DEFAULT_MAX_TOKENS`、`LLM_PROXY_ANTHROPIC_MESSAGES_BACKEND`、`LLM_PROXY_RESPONSES_BACKEND` 行为，并新增 `LLM_PROXY_BACKENDS`、`LLM_PROXY_MODEL_ALIASES`、`LLM_PROXY_ANTHROPIC_CACHE_INJECTION`、`LLM_PROXY_REASONING_STORE` 结构化覆盖。
+- 启动路径现在先加载并校验配置，再构造 `AppState`；现有 env-only 启动方式继续可用，Anthropic cache-control 注入通过配置开关控制且默认保持当前启用行为。
+- 新增配置单元测试覆盖 TOML/YAML 解析、文件扩展名识别、env 覆盖优先级、legacy 后端创建、backend JSON 覆盖、模型别名校验、重复后端与缺失 profile 拒绝。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M7-02 `[TODO]` 模型路由 (`provider/router.rs`)
 根据请求的 model 名 + 端点类型，用配置选择后端与 profile，并改写发往后端的 model 名。
