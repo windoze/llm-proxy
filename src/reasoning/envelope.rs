@@ -1,6 +1,6 @@
 //! Base64 envelope for carrying provider reasoning payloads without server state.
 
-// Later M4 tasks wire the core envelope into Responses items and Anthropic signatures.
+// Later M4 tasks wire these adapters into the rich protocol bridges.
 #![allow(dead_code)]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -15,6 +15,7 @@ use crate::{
 
 const ENVELOPE_VERSION: u8 = 1;
 const CHECKSUM_DOMAIN: &[u8] = b"llm-proxy.reasoning-envelope";
+const ANTHROPIC_SIGNATURE_PREFIX: &str = "llm_proxy_sig_v1:";
 const RESPONSES_REASONING_TYPE: &str = "reasoning";
 const RESPONSES_REASONING_ID_PREFIX: &str = "rs_llm_proxy";
 
@@ -159,6 +160,33 @@ pub fn unwrap_from_responses_reasoning_item(item: &Value) -> Result<SourceBlock>
     unwrap(encrypted_content)
 }
 
+/// Wraps a source block as an Anthropic-compatible thinking signature string.
+pub fn wrap_as_signature(source_block: &SourceBlock) -> Result<String> {
+    Ok(format!(
+        "{ANTHROPIC_SIGNATURE_PREFIX}{}",
+        wrap(source_block)?
+    ))
+}
+
+/// Extracts and verifies an envelope carried by an Anthropic thinking signature.
+pub fn unwrap_from_signature(signature: &str) -> Result<SourceBlock> {
+    let encoded = signature
+        .strip_prefix(ANTHROPIC_SIGNATURE_PREFIX)
+        .ok_or_else(|| {
+            mapping_error(format!(
+                "Anthropic thinking signature must start with `{ANTHROPIC_SIGNATURE_PREFIX}`"
+            ))
+        })?;
+
+    if encoded.is_empty() {
+        return Err(mapping_error(
+            "Anthropic thinking signature is missing its envelope payload",
+        ));
+    }
+
+    unwrap(encoded)
+}
+
 fn encode_envelope(envelope: &Envelope) -> Result<String> {
     let bytes = serde_json::to_vec(envelope)?;
 
@@ -269,6 +297,77 @@ mod tests {
         assert!(item["id"].as_str().is_some_and(|id| id.starts_with("rs_")));
         assert!(item["encrypted_content"].as_str().unwrap().len() > 64);
         assert_eq!(unwrap_from_responses_reasoning_item(&item).unwrap(), source);
+    }
+
+    #[test]
+    fn wraps_envelope_as_anthropic_signature() {
+        let source = SourceBlock::from_json(
+            Provider::Responses,
+            &json!({
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "enc_resp_123",
+                "status": "completed"
+            }),
+        )
+        .unwrap();
+
+        let signature = wrap_as_signature(&source).unwrap();
+
+        assert!(signature.starts_with(ANTHROPIC_SIGNATURE_PREFIX));
+        assert!(signature.len() > ANTHROPIC_SIGNATURE_PREFIX.len() + 64);
+        assert_eq!(unwrap_from_signature(&signature).unwrap(), source);
+    }
+
+    #[test]
+    fn anthropic_signature_preserves_payload_bytes() {
+        let payload =
+            br#"{"type":"reasoning","summary":[],"encrypted_content":"opaque-tool-use-history"}"#;
+        let source = SourceBlock::new(Provider::Responses, payload.to_vec());
+
+        let decoded = unwrap_from_signature(&wrap_as_signature(&source).unwrap()).unwrap();
+
+        assert_eq!(decoded.source, Provider::Responses);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn rejects_non_proxy_anthropic_signature() {
+        let err = unwrap_from_signature("sig_real_anthropic_opaque").unwrap_err();
+
+        assert!(
+            matches!(err, ProxyError::ProtocolMapping(message) if message.contains("signature"))
+        );
+    }
+
+    #[test]
+    fn rejects_empty_anthropic_signature_payload() {
+        let err = unwrap_from_signature(ANTHROPIC_SIGNATURE_PREFIX).unwrap_err();
+
+        assert!(matches!(err, ProxyError::ProtocolMapping(message) if message.contains("missing")));
+    }
+
+    #[test]
+    fn anthropic_signature_detects_tampered_payload() {
+        let source = SourceBlock::new(
+            Provider::Responses,
+            br#"{"type":"reasoning","encrypted_content":"enc"}"#.to_vec(),
+        );
+        let signature = wrap_as_signature(&source).unwrap();
+        let encoded = signature.strip_prefix(ANTHROPIC_SIGNATURE_PREFIX).unwrap();
+        let bytes = STANDARD.decode(encoded).unwrap();
+        let mut envelope: Envelope = serde_json::from_slice(&bytes).unwrap();
+        envelope.payload[0] ^= 0xff;
+        let tampered = format!(
+            "{ANTHROPIC_SIGNATURE_PREFIX}{}",
+            STANDARD.encode(serde_json::to_vec(&envelope).unwrap())
+        );
+
+        let err = unwrap_from_signature(&tampered).unwrap_err();
+
+        assert!(
+            matches!(err, ProxyError::ProtocolMapping(message) if message.contains("checksum"))
+        );
     }
 
     #[test]
