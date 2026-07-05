@@ -2,12 +2,12 @@
 
 I cannot include private chain-of-thought, but I will keep this file updated with the concrete plan, decisions, and progress for the current invocation.
 
-Current task: `M2-01` Anthropic request parsing in `protocol/anthropic/decode.rs`.
+Current task: `M2-02` Anthropic non-streaming response encoding in `protocol/anthropic/encode.rs`.
 
-1. [DONE] Read the existing IR definitions and OpenAI Chat decoder to match established data shapes, validation style, and tests.
-2. [DONE] Add an Anthropic decoder module that implements `anthropic_request_to_ir(body: &Value) -> Result<IrRequest>`.
-3. [DONE] Cover top-level `system`, message content blocks (`text`, `image`, `tool_use`, `tool_result`, `thinking`), tools, tool choice, max tokens, stream, stop, and provider-specific extras as required by `TODO.md`.
-4. [DONE] Add focused unit tests for string/block-array system prompts, tool use/result mapping, tool choice mapping, and Anthropic thinking signatures.
-5. [DONE] Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. [DONE] Mark `M2-01` `[DONE]` in `TODO.md` and update its completion record.
-7. [DONE] Commit the task changes and stop.
+1. [DONE] Check the latest commit message for unfinished issues directly relevant to `M2-02`.
+2. [DONE] Inspect existing IR response types, Anthropic decoder conventions, protocol module exports, and OpenAI Chat response parsing tests to match project style.
+3. [DONE] Implement `ir_response_to_anthropic(resp: &IrResponse) -> Value`, covering Anthropic Messages response fields, content block mapping, stop reason mapping, usage mapping, and thinking signature restoration from `Thinking.opaque`.
+4. [DONE] Add focused unit tests for text/tool/thinking blocks, stop reasons, usage cache fields, and provider-specific edge behavior required by the task.
+5. [DONE] Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. [DONE] Mark `M2-02` `[DONE]` in `TODO.md` and update its completion record.
+7. [IN_PROGRESS] Commit all resulting changes with a descriptive `M2-02` message and stop.

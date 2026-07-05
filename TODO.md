@@ -248,11 +248,19 @@ echo_policy 在有/无 tool_calls 场景符合 §4.1。用 `insta` 做快照。
 - 新增单元测试覆盖块数组系统提示、文本系统提示、工具定义/选择、tool_use/tool_result、Anthropic thinking signature 保真，以及未知内容块拒绝。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-02 `[TODO]` Anthropic 非流式响应编码 (`protocol/anthropic/encode.rs`)
+### [DONE] M2-02 Anthropic 非流式响应编码 (`protocol/anthropic/encode.rs`)
 实现 `ir_response_to_anthropic(resp:&IrResponse) -> Value`：
 IR content → Anthropic `content` block 数组；`ToolUse` → `tool_use` block；
 `Thinking` → `thinking` block（signature 从 opaque）；`StopReason` → `end_turn/max_tokens/stop_sequence/tool_use`；
 `Usage` → `{input_tokens,output_tokens,cache_read_input_tokens?}`。输出符合 Anthropic Messages API 响应结构。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/anthropic/encode.rs` 并在 `protocol::anthropic` 暴露 encoder。
+- 已实现 `ir_response_to_anthropic`，输出 Anthropic Messages API 非流式响应结构（`type=message`、`role=assistant`、`content`、`stop_reason`、`stop_sequence`、`usage`）。
+- 已覆盖 IR `Text`/`Image`/`ToolUse`/`ToolResult`/`Thinking` 内容块到 Anthropic content block 的编码；`Thinking.opaque` 会按 Anthropic signature 原样恢复为 UTF-8 字符串。
+- 已将 `StopReason` 映射为 `end_turn`/`max_tokens`/`stop_sequence`/`tool_use`，并保留 `Other` 自定义停止原因；`Usage.cache_read` 映射到 `cache_read_input_tokens`，`Usage.cache_write` 映射到 Anthropic `cache_creation_input_tokens`。
+- 新增单元测试覆盖 thinking+tool_use 响应、所有 stop reason 映射、usage cache 字段，以及 image/tool_result 嵌套内容块编码。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-03 `[TODO]` 通用 SSE 解析基础设施 (`stream/sse.rs`)
 封装基于 `eventsource-stream` 的辅助：把 `reqwest` bytes_stream 解析为 `(event_type, data)` 迭代，
