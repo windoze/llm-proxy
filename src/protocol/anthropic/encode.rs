@@ -5,48 +5,59 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::ir::{
-    message::{ContentBlock, ImageSource, Thinking},
-    request::{IrResponse, StopReason, Usage},
+use crate::{
+    error::{ProxyError, Result},
+    ir::{
+        message::{ContentBlock, ImageSource, Provider, Thinking},
+        request::{IrResponse, StopReason, Usage},
+    },
+    reasoning::envelope::{SourceBlock, wrap_as_signature},
 };
 
 /// Converts a provider-neutral non-streaming response into an Anthropic message.
-pub fn ir_response_to_anthropic(resp: &IrResponse) -> Value {
-    json!({
+pub fn ir_response_to_anthropic(resp: &IrResponse) -> Result<Value> {
+    Ok(json!({
         "id": resp.id,
         "type": "message",
         "role": "assistant",
         "model": resp.model,
-        "content": resp.content.iter().map(encode_content_block).collect::<Vec<_>>(),
+        "content": encode_content_blocks(&resp.content)?,
         "stop_reason": encode_stop_reason(&resp.stop_reason),
         "stop_sequence": null,
         "usage": encode_usage(&resp.usage),
-    })
+    }))
 }
 
-fn encode_content_block(block: &ContentBlock) -> Value {
+fn encode_content_blocks(content: &[ContentBlock]) -> Result<Vec<Value>> {
+    content.iter().map(encode_content_block).collect()
+}
+
+fn encode_content_block(block: &ContentBlock) -> Result<Value> {
     match block {
-        ContentBlock::Text { text } => json!({
+        ContentBlock::Text { text } => Ok(json!({
             "type": "text",
             "text": text,
-        }),
-        ContentBlock::Image(source) => encode_image(source),
-        ContentBlock::ToolUse { id, name, input } => json!({
+        })),
+        ContentBlock::Image(source) => Ok(encode_image(source)),
+        ContentBlock::ToolUse { id, name, input } => Ok(json!({
             "type": "tool_use",
             "id": id,
             "name": name,
             "input": input,
-        }),
+        })),
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
-        } => json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": content.iter().map(encode_content_block).collect::<Vec<_>>(),
-            "is_error": is_error,
-        }),
+        } => {
+            let content = encode_content_blocks(content)?;
+            Ok(json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": is_error,
+            }))
+        }
         ContentBlock::Thinking(thinking) => encode_thinking(thinking),
     }
 }
@@ -71,21 +82,41 @@ fn encode_image(source: &ImageSource) -> Value {
     }
 }
 
-fn encode_thinking(thinking: &Thinking) -> Value {
+fn encode_thinking(thinking: &Thinking) -> Result<Value> {
     let mut block = Map::new();
     block.insert("type".to_owned(), json!("thinking"));
 
-    if let Some(text) = &thinking.text {
-        block.insert("thinking".to_owned(), json!(text));
+    match &thinking.source {
+        Provider::Responses => {
+            let opaque = thinking.opaque.as_deref().ok_or_else(|| {
+                mapping_error(
+                    "Responses-origin thinking requires opaque encrypted_content for Anthropic signature envelope",
+                )
+            })?;
+            let signature = wrap_as_signature(&SourceBlock::new(Provider::Responses, opaque))?;
+            block.insert(
+                "thinking".to_owned(),
+                json!(thinking.text.as_deref().unwrap_or("")),
+            );
+            block.insert("signature".to_owned(), json!(signature));
+        }
+        _ => {
+            if let Some(text) = &thinking.text {
+                block.insert("thinking".to_owned(), json!(text));
+            }
+
+            if let Some(opaque) = &thinking.opaque {
+                let signature = std::str::from_utf8(opaque).map_err(|err| {
+                    mapping_error(format!(
+                        "Anthropic thinking signature must be valid UTF-8: {err}"
+                    ))
+                })?;
+                block.insert("signature".to_owned(), json!(signature));
+            }
+        }
     }
 
-    if let Some(opaque) = &thinking.opaque {
-        let signature =
-            std::str::from_utf8(opaque).expect("Anthropic thinking signature must be valid UTF-8");
-        block.insert("signature".to_owned(), json!(signature));
-    }
-
-    Value::Object(block)
+    Ok(Value::Object(block))
 }
 
 fn encode_stop_reason(stop_reason: &StopReason) -> &str {
@@ -112,6 +143,10 @@ fn encode_usage(usage: &Usage) -> Value {
     }
 
     Value::Object(value)
+}
+
+fn mapping_error(message: impl Into<String>) -> ProxyError {
+    ProxyError::ProtocolMapping(message.into())
 }
 
 #[cfg(test)]
@@ -152,7 +187,7 @@ mod tests {
         };
 
         assert_eq!(
-            ir_response_to_anthropic(&response),
+            ir_response_to_anthropic(&response).unwrap(),
             json!({
                 "id": "msg_1",
                 "type": "message",
@@ -211,7 +246,7 @@ mod tests {
                 },
             };
 
-            let encoded = ir_response_to_anthropic(&response);
+            let encoded = ir_response_to_anthropic(&response).unwrap();
 
             assert_eq!(encoded["stop_reason"], expected);
             assert_eq!(
@@ -251,8 +286,10 @@ mod tests {
             },
         };
 
+        let encoded = ir_response_to_anthropic(&response).unwrap();
+
         assert_eq!(
-            ir_response_to_anthropic(&response)["content"],
+            encoded["content"],
             json!([
                 {
                     "type": "image",
@@ -275,5 +312,70 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn wraps_responses_thinking_opaque_as_anthropic_signature() {
+        let response = IrResponse {
+            id: "msg_reasoning".to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+            content: vec![ContentBlock::Thinking(Thinking {
+                text: Some("Need the weather tool.".to_owned()),
+                opaque: Some(b"enc_payload_from_responses".to_vec()),
+                source: Provider::Responses,
+                echo_policy: EchoPolicy::Always,
+            })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 12,
+                output_tokens: 4,
+                cache_read: None,
+                cache_write: None,
+            },
+        };
+
+        let encoded = ir_response_to_anthropic(&response).unwrap();
+        let thinking = &encoded["content"][0];
+
+        assert_eq!(thinking["type"], "thinking");
+        assert_eq!(thinking["thinking"], "Need the weather tool.");
+
+        let signature = thinking["signature"].as_str().unwrap();
+        let source_block = crate::reasoning::envelope::unwrap_from_signature(signature).unwrap();
+
+        assert_eq!(source_block.source, Provider::Responses);
+        assert_eq!(
+            source_block.payload.as_slice(),
+            b"enc_payload_from_responses"
+        );
+    }
+
+    #[test]
+    fn rejects_responses_thinking_without_opaque_payload() {
+        let response = IrResponse {
+            id: "msg_missing_reasoning".to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+            content: vec![ContentBlock::Thinking(Thinking {
+                text: Some("Need the weather tool.".to_owned()),
+                opaque: None,
+                source: Provider::Responses,
+                echo_policy: EchoPolicy::Always,
+            })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 12,
+                output_tokens: 4,
+                cache_read: None,
+                cache_write: None,
+            },
+        };
+
+        let err = ir_response_to_anthropic(&response).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProxyError::ProtocolMapping(message)
+                if message.contains("Responses-origin thinking requires opaque encrypted_content")
+        ));
     }
 }
