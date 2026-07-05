@@ -328,28 +328,40 @@ fn decode_reasoning_summary_part(value: &Value, path: String) -> Result<String> 
 
 fn decode_tools(value: Option<&Value>) -> Result<Vec<ToolDef>> {
     match value {
-        Some(Value::Array(tools)) => tools
-            .iter()
-            .enumerate()
-            .map(|(index, tool)| decode_tool(tool, format!("request.tools[{index}]")))
-            .collect(),
+        Some(Value::Array(tools)) => {
+            let mut decoded_tools = Vec::new();
+            for (index, tool) in tools.iter().enumerate() {
+                decode_tool(tool, format!("request.tools[{index}]"), &mut decoded_tools)?;
+            }
+            Ok(decoded_tools)
+        }
         Some(Value::Null) | None => Ok(Vec::new()),
         Some(_) => Err(mapping_error("request.tools must be an array")),
     }
 }
 
-fn decode_tool(value: &Value, path: String) -> Result<ToolDef> {
+fn decode_tool(value: &Value, path: String, output: &mut Vec<ToolDef>) -> Result<()> {
     let tool = value
         .as_object()
         .ok_or_else(|| mapping_error(format!("{path} must be an object")))?;
     let tool_type = required_string(tool, "type", format!("{path}.type"))?;
-    if tool_type != "function" {
-        return Err(ProxyError::UnsupportedFeature {
-            feature: format!("tool type `{tool_type}`"),
-            protocol: PROTOCOL.to_owned(),
-        });
+
+    match tool_type {
+        "function" => output.push(decode_function_tool(tool, path)?),
+        "namespace" => decode_namespace_tool(tool, path, output)?,
+        "web_search" => decode_web_search_tool(tool, path)?,
+        other => {
+            return Err(ProxyError::UnsupportedFeature {
+                feature: format!("tool type `{other}`"),
+                protocol: PROTOCOL.to_owned(),
+            });
+        }
     }
 
+    Ok(())
+}
+
+fn decode_function_tool(tool: &Map<String, Value>, path: String) -> Result<ToolDef> {
     let description =
         optional_string(tool, "description", format!("{path}.description"))?.map(ToOwned::to_owned);
     let input_schema = tool
@@ -361,6 +373,80 @@ fn decode_tool(value: &Value, path: String) -> Result<ToolDef> {
         name: required_string(tool, "name", format!("{path}.name"))?.to_owned(),
         description,
         input_schema,
+    })
+}
+
+fn decode_namespace_tool(
+    tool: &Map<String, Value>,
+    path: String,
+    output: &mut Vec<ToolDef>,
+) -> Result<()> {
+    let namespace_name = required_string(tool, "name", format!("{path}.name"))?;
+    let namespace_description =
+        optional_string(tool, "description", format!("{path}.description"))?;
+    let tools = tool
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| mapping_error(format!("{path}.tools must be an array")))?;
+
+    for (index, nested_tool) in tools.iter().enumerate() {
+        let nested_path = format!("{path}.tools[{index}]");
+        let nested_tool = nested_tool
+            .as_object()
+            .ok_or_else(|| mapping_error(format!("{nested_path} must be an object")))?;
+        let nested_type = required_string(nested_tool, "type", format!("{nested_path}.type"))?;
+        if nested_type != "function" {
+            return Err(ProxyError::UnsupportedFeature {
+                feature: format!("namespace tool type `{nested_type}`"),
+                protocol: PROTOCOL.to_owned(),
+            });
+        }
+
+        let mut decoded_tool = decode_function_tool(nested_tool, nested_path)?;
+        decoded_tool.description = namespace_scoped_description(
+            namespace_name,
+            namespace_description,
+            decoded_tool.description,
+        );
+        output.push(decoded_tool);
+    }
+
+    Ok(())
+}
+
+fn decode_web_search_tool(tool: &Map<String, Value>, path: String) -> Result<()> {
+    let external_web_access = optional_bool(
+        tool,
+        "external_web_access",
+        format!("{path}.external_web_access"),
+    )?
+    .unwrap_or(false);
+    if external_web_access {
+        return Err(ProxyError::UnsupportedFeature {
+            feature: "web_search tool with external_web_access=true".to_owned(),
+            protocol: PROTOCOL.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn namespace_scoped_description(
+    namespace_name: &str,
+    namespace_description: Option<&str>,
+    tool_description: Option<String>,
+) -> Option<String> {
+    let namespace_prefix = match namespace_description {
+        Some(description) if !description.is_empty() => {
+            format!("Namespace `{namespace_name}`: {description}")
+        }
+        _ => format!("Namespace `{namespace_name}`."),
+    };
+
+    Some(match tool_description {
+        Some(description) if !description.is_empty() => {
+            format!("{namespace_prefix}\n\n{description}")
+        }
+        _ => namespace_prefix,
     })
 }
 
@@ -684,6 +770,108 @@ mod tests {
                 ("metadata".to_owned(), json!({ "session": "s_1" })),
                 ("store".to_owned(), json!(false)),
             ])
+        );
+    }
+
+    #[test]
+    fn decodes_codex_namespace_tools_and_ignores_disabled_web_search() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": "run a safe command",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "Execute a command.",
+                    "strict": false,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cmd": { "type": "string" }
+                        },
+                        "required": ["cmd"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "type": "namespace",
+                    "name": "multi_agent_v1",
+                    "description": "Tools for spawning and managing sub-agents.",
+                    "tools": [{
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "description": "Spawn a sub-agent.",
+                        "strict": false,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": { "type": "string" }
+                            },
+                            "required": ["message"],
+                            "additionalProperties": false
+                        }
+                    }]
+                },
+                {
+                    "type": "web_search",
+                    "external_web_access": false
+                }
+            ]
+        });
+
+        let request = responses_request_to_ir(&body).unwrap();
+
+        assert_eq!(request.tools.len(), 2);
+        assert_eq!(request.tools[0].name, "exec_command");
+        assert_eq!(
+            request.tools[0].input_schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string" }
+                },
+                "required": ["cmd"],
+                "additionalProperties": false
+            })
+        );
+        assert_eq!(request.tools[1].name, "spawn_agent");
+        assert!(
+            request.tools[1]
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("Namespace `multi_agent_v1`")
+        );
+        assert_eq!(
+            request.tools[1].input_schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" }
+                },
+                "required": ["message"],
+                "additionalProperties": false
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_enabled_web_search_tool_for_chat_backend() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": "search the web",
+            "tools": [{
+                "type": "web_search",
+                "external_web_access": true
+            }]
+        });
+
+        let error = responses_request_to_ir(&body).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::UnsupportedFeature { feature, protocol }
+                if feature == "web_search tool with external_web_access=true"
+                    && protocol == "responses")
         );
     }
 
