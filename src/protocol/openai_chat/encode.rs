@@ -11,7 +11,13 @@ use crate::{
         message::{ContentBlock, EchoPolicy, ImageSource, Message, Role, Thinking},
         request::{IrRequest, ToolChoice, ToolDef},
     },
-    protocol::tool_ids::{ToolIdMap, tool_id_map_from_request},
+    protocol::{
+        capability::{
+            IrTargetProtocol, chat_response_format_from_extra, passthrough_extra_fields,
+            reasoning_effort_from_extra,
+        },
+        tool_ids::{ToolIdMap, tool_id_map_from_request},
+    },
     provider::CapabilityProfile,
 };
 
@@ -489,6 +495,20 @@ fn insert_extra(
         );
     }
 
+    if !body.contains_key("reasoning_effort")
+        && !is_blocklisted(blocklist, "reasoning_effort")
+        && let Some(reasoning_effort) = reasoning_effort_from_extra(&request.extra)?
+    {
+        body.insert(
+            "reasoning_effort".to_owned(),
+            Value::String(
+                profile
+                    .normalize_reasoning_effort(reasoning_effort)
+                    .to_owned(),
+            ),
+        );
+    }
+
     if !is_blocklisted(blocklist, "n")
         && let Some(choice_count) = request.extra.get("n")
     {
@@ -501,11 +521,20 @@ fn insert_extra(
         );
     }
 
-    for (key, value) in &request.extra {
-        if CORE_REQUEST_FIELDS.contains(&key.as_str()) || is_blocklisted(blocklist, key) {
-            continue;
-        }
-        body.insert(key.clone(), value.clone());
+    if !body.contains_key("response_format")
+        && !is_blocklisted(blocklist, "response_format")
+        && let Some(response_format) = chat_response_format_from_extra(&request.extra)?
+    {
+        body.insert("response_format".to_owned(), response_format);
+    }
+
+    for (key, value) in passthrough_extra_fields(
+        IrTargetProtocol::OpenAiChat,
+        &request.extra,
+        CORE_REQUEST_FIELDS,
+        blocklist,
+    )? {
+        body.insert(key, value);
     }
 
     Ok(())
@@ -550,7 +579,7 @@ fn mapping_error(message: impl Into<String>) -> ProxyError {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     use super::*;
     use crate::{
@@ -710,6 +739,57 @@ mod tests {
                 "{dropped} should be dropped"
             );
         }
+    }
+
+    #[test]
+    fn emulates_responses_structured_output_and_reasoning_controls() {
+        let mut request = request_with_messages(vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "return JSON".to_owned(),
+            }],
+        }]);
+        request.extra = Map::from_iter([
+            (
+                "text".to_owned(),
+                json!({
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "answer": { "type": "string" }
+                            },
+                            "required": ["answer"]
+                        }
+                    }
+                }),
+            ),
+            ("output_config".to_owned(), json!({ "effort": "low" })),
+        ]);
+
+        let encoded = ir_request_to_chat(&request, &DeepSeek).unwrap();
+
+        assert_eq!(encoded["reasoning_effort"], "high");
+        assert_eq!(
+            encoded["response_format"],
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answer": { "type": "string" }
+                        },
+                        "required": ["answer"]
+                    }
+                }
+            })
+        );
+        assert!(encoded.get("text").is_none());
+        assert!(encoded.get("output_config").is_none());
     }
 
     #[test]

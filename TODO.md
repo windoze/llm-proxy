@@ -741,9 +741,15 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 新增单元测试和路由测试覆盖 Anthropic/Responses 错误 JSON、上游 429/503 状态映射、`Retry-After` 与限流头翻译。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M7-04 `[TODO]` 不支持特性表 (`protocol/capability.rs`)
+### [DONE] M7-04 不支持特性表 (`protocol/capability.rs`)
 集中管理每个 `IR→协议` 方向的特性支持决策：drop / emulate / 400（DESIGN §6.5）。
 例如：Responses json_schema → Anthropic 用 tool 模拟；不支持的参数明确 drop 或拒绝。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/capability.rs`，集中定义 `IR→OpenAI Chat`、`IR→Anthropic Messages`、`IR→OpenAI Responses` 的 extra feature 决策表，统一表达 pass-through / drop / emulate / reject 行为。
+- 已将 Chat、Anthropic、Responses 请求 encoder 改为调用能力表：Responses `text.format` 可转换为 Chat `response_format`，Chat `response_format` 可转换为 Responses `text.format`，Anthropic 对 Responses/Chat 结构化输出使用合成 tool 强制模拟；无状态无法保真的 `previous_response_id`、启用型 `store`/`background` 等会明确 400 拒绝或按表 drop。
+- 已补充单元测试覆盖能力表分类、extra 过滤、Responses json_schema → Anthropic tool 模拟、Responses json_schema → Chat `response_format`、Chat `response_format` → Responses `text.format`、以及结构化输出与用户 tools 冲突时的拒绝路径。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M7-05 `[TODO]` Observability
 `tracing` 结构化日志：每请求记录链路、后端、耗时、token 用量。加可选的请求/响应 dump（调试开关，脱敏凭据）。

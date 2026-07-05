@@ -13,7 +13,12 @@ use crate::{
         message::{ContentBlock, ImageSource, Provider, Role, Thinking},
         request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
-    protocol::tool_ids::{ToolIdMap, responses_tool_id_map_from_request},
+    protocol::{
+        capability::{
+            IrTargetProtocol, passthrough_extra_fields, responses_text_format_from_extra,
+        },
+        tool_ids::{ToolIdMap, responses_tool_id_map_from_request},
+    },
     reasoning::envelope::{SourceBlock, wrap_as_responses_reasoning_item},
 };
 
@@ -33,25 +38,6 @@ const CORE_REQUEST_FIELDS: &[&str] = &[
     "stop",
     "stream",
 ];
-// IR extras may originate from a different frontend protocol; only pass fields
-// that are valid Responses request options across this boundary.
-const RESPONSES_EXTRA_FIELDS: &[&str] = &[
-    "background",
-    "include",
-    "max_tool_calls",
-    "metadata",
-    "parallel_tool_calls",
-    "previous_response_id",
-    "prompt",
-    "reasoning",
-    "service_tier",
-    "store",
-    "stream_options",
-    "text",
-    "truncation",
-    "user",
-];
-
 /// Converts a provider-neutral request into an OpenAI Responses request body.
 pub fn ir_request_to_responses(request: &IrRequest) -> Result<Value> {
     let tool_ids = responses_tool_id_map_from_request(request)?;
@@ -454,13 +440,19 @@ fn insert_optional_f32(
 }
 
 fn insert_request_extra(body: &mut Map<String, Value>, request: &IrRequest) -> Result<()> {
-    for (key, value) in &request.extra {
-        if CORE_REQUEST_FIELDS.contains(&key.as_str())
-            || !RESPONSES_EXTRA_FIELDS.contains(&key.as_str())
-        {
-            continue;
-        }
-        body.insert(key.clone(), value.clone());
+    for (key, value) in passthrough_extra_fields(
+        IrTargetProtocol::OpenAiResponses,
+        &request.extra,
+        CORE_REQUEST_FIELDS,
+        &[],
+    )? {
+        body.insert(key, value);
+    }
+
+    if !body.contains_key("text")
+        && let Some(text) = responses_text_format_from_extra(&request.extra)?
+    {
+        body.insert("text".to_owned(), text);
     }
 
     if !body.contains_key("reasoning") {
@@ -933,6 +925,16 @@ mod tests {
                 ("metadata".to_owned(), json!({ "trace_id": "m5-live" })),
                 ("store".to_owned(), json!(true)),
                 ("output_config".to_owned(), json!({ "effort": "high" })),
+                (
+                    "response_format".to_owned(),
+                    json!({
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "answer",
+                            "schema": { "type": "object" }
+                        }
+                    }),
+                ),
                 ("container".to_owned(), json!({ "id": "anthropic-only" })),
                 ("mcp_servers".to_owned(), json!([])),
             ]),
@@ -943,7 +945,18 @@ mod tests {
         assert_eq!(encoded["metadata"], json!({ "trace_id": "m5-live" }));
         assert_eq!(encoded["store"], json!(true));
         assert_eq!(encoded["reasoning"], json!({ "effort": "high" }));
+        assert_eq!(
+            encoded["text"],
+            json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer",
+                    "schema": { "type": "object" }
+                }
+            })
+        );
         assert!(encoded.get("output_config").is_none());
+        assert!(encoded.get("response_format").is_none());
         assert!(encoded.get("container").is_none());
         assert!(encoded.get("mcp_servers").is_none());
     }

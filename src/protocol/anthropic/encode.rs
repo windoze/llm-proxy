@@ -11,7 +11,13 @@ use crate::{
         message::{ContentBlock, ImageSource, Message, Provider, Role, Thinking},
         request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
-    protocol::tool_ids::validate_tool_result_pairs,
+    protocol::{
+        capability::{
+            ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME, IrTargetProtocol,
+            anthropic_structured_output_tool, passthrough_extra_fields,
+        },
+        tool_ids::validate_tool_result_pairs,
+    },
     reasoning::envelope::{SourceBlock, wrap_as_signature},
 };
 
@@ -28,19 +34,11 @@ const ANTHROPIC_REQUEST_CORE_FIELDS: &[&str] = &[
     "stop_sequences",
     "stream",
 ];
-const ANTHROPIC_REQUEST_EXTRA_FIELDS: &[&str] = &[
-    "metadata",
-    "service_tier",
-    "thinking",
-    "output_config",
-    "context_management",
-    "container",
-    "mcp_servers",
-];
-
 /// Converts a provider-neutral request into an Anthropic Messages request body.
 pub fn ir_request_to_anthropic(request: &IrRequest) -> Result<Value> {
     validate_tool_result_pairs(request)?;
+    let structured_output_tool = anthropic_structured_output_tool(&request.extra)?;
+    let (tools, tool_choice) = effective_request_tools(request, structured_output_tool)?;
 
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(request.model.clone()));
@@ -65,14 +63,14 @@ pub fn ir_request_to_anthropic(request: &IrRequest) -> Result<Value> {
         Value::Array(encode_request_messages(&request.messages)?),
     );
 
-    if !request.tools.is_empty() {
-        body.insert("tools".to_owned(), encode_request_tools(&request.tools));
+    if !tools.is_empty() {
+        body.insert("tools".to_owned(), encode_request_tools(&tools));
     }
 
-    if !request.tools.is_empty() || request.tool_choice != ToolChoice::Auto {
+    if let Some(tool_choice) = tool_choice {
         body.insert(
             "tool_choice".to_owned(),
-            encode_request_tool_choice(&request.tool_choice),
+            encode_request_tool_choice(&tool_choice),
         );
     }
 
@@ -88,9 +86,49 @@ pub fn ir_request_to_anthropic(request: &IrRequest) -> Result<Value> {
     }
 
     body.insert("stream".to_owned(), Value::Bool(request.stream));
-    insert_request_extra(&mut body, request);
+    insert_request_extra(&mut body, request)?;
 
     Ok(Value::Object(body))
+}
+
+fn effective_request_tools(
+    request: &IrRequest,
+    structured_output_tool: Option<ToolDef>,
+) -> Result<(Vec<ToolDef>, Option<ToolChoice>)> {
+    let Some(structured_output_tool) = structured_output_tool else {
+        let tool_choice = (!request.tools.is_empty() || request.tool_choice != ToolChoice::Auto)
+            .then(|| request.tool_choice.clone());
+        return Ok((request.tools.clone(), tool_choice));
+    };
+
+    validate_structured_output_tool_emulation(request)?;
+    Ok((
+        vec![structured_output_tool],
+        Some(ToolChoice::Tool(
+            ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME.to_owned(),
+        )),
+    ))
+}
+
+fn validate_structured_output_tool_emulation(request: &IrRequest) -> Result<()> {
+    if !request.tools.is_empty() {
+        return Err(ProxyError::UnsupportedFeature {
+            feature: "structured output emulation together with user tools".to_owned(),
+            protocol: "anthropic".to_owned(),
+        });
+    }
+
+    match &request.tool_choice {
+        ToolChoice::Auto | ToolChoice::Required => Ok(()),
+        ToolChoice::None => Err(ProxyError::UnsupportedFeature {
+            feature: "structured output emulation with tool_choice none".to_owned(),
+            protocol: "anthropic".to_owned(),
+        }),
+        ToolChoice::Tool(name) => Err(ProxyError::UnsupportedFeature {
+            feature: format!("structured output emulation with tool_choice `{name}`"),
+            protocol: "anthropic".to_owned(),
+        }),
+    }
 }
 
 fn encode_request_messages(messages: &[Message]) -> Result<Vec<Value>> {
@@ -366,15 +404,17 @@ fn insert_optional_f32(
     Ok(())
 }
 
-fn insert_request_extra(body: &mut Map<String, Value>, request: &IrRequest) {
-    for (key, value) in &request.extra {
-        if ANTHROPIC_REQUEST_CORE_FIELDS.contains(&key.as_str())
-            || !ANTHROPIC_REQUEST_EXTRA_FIELDS.contains(&key.as_str())
-        {
-            continue;
-        }
-        body.insert(key.clone(), value.clone());
+fn insert_request_extra(body: &mut Map<String, Value>, request: &IrRequest) -> Result<()> {
+    for (key, value) in passthrough_extra_fields(
+        IrTargetProtocol::AnthropicMessages,
+        &request.extra,
+        ANTHROPIC_REQUEST_CORE_FIELDS,
+        &[],
+    )? {
+        body.insert(key, value);
     }
+
+    Ok(())
 }
 
 /// Converts a provider-neutral non-streaming response into an Anthropic message.
@@ -654,6 +694,107 @@ mod tests {
                 "metadata": { "session": "s_1" },
                 "output_config": { "effort": "high" }
             })
+        );
+    }
+
+    #[test]
+    fn emulates_responses_json_schema_with_forced_anthropic_tool() {
+        let request = IrRequest {
+            model: "claude-sonnet-4-5".to_owned(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Return a structured answer.".to_owned(),
+                }],
+            }],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_tokens: Some(128),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::from_iter([(
+                "text".to_owned(),
+                json!({
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "answer": { "type": "string" }
+                            },
+                            "required": ["answer"]
+                        },
+                        "strict": true
+                    }
+                }),
+            )]),
+        };
+
+        let encoded = ir_request_to_anthropic(&request).unwrap();
+
+        assert_eq!(
+            encoded["tools"],
+            json!([{
+                "name": ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME,
+                "description": "Return the final answer by calling this tool with JSON matching the requested schema.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    },
+                    "required": ["answer"]
+                }
+            }])
+        );
+        assert_eq!(
+            encoded["tool_choice"],
+            json!({
+                "type": "tool",
+                "name": ANTHROPIC_STRUCTURED_OUTPUT_TOOL_NAME
+            })
+        );
+        assert!(encoded.get("text").is_none());
+    }
+
+    #[test]
+    fn rejects_structured_output_emulation_when_user_tools_are_present() {
+        let mut request = IrRequest {
+            model: "claude-sonnet-4-5".to_owned(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Return a structured answer.".to_owned(),
+                }],
+            }],
+            tools: vec![ToolDef {
+                name: "lookup".to_owned(),
+                description: None,
+                input_schema: json!({ "type": "object" }),
+            }],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: Some(128),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::new(),
+        };
+        request.extra.insert(
+            "text".to_owned(),
+            json!({ "format": { "type": "json_schema", "schema": { "type": "object" } } }),
+        );
+
+        let error = ir_request_to_anthropic(&request).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::UnsupportedFeature { feature, protocol } if feature == "structured output emulation together with user tools" && protocol == "anthropic")
         );
     }
 

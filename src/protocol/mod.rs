@@ -3,6 +3,7 @@
 //! Each protocol family owns its decode, encode, and streaming logic.
 
 pub mod anthropic;
+pub mod capability;
 pub mod openai_chat;
 pub mod responses;
 pub mod tool_ids;

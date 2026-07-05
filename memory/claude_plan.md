@@ -12,26 +12,25 @@ I will follow the repository task order without doing broad issue triage first. 
 
 ## Current Task
 
-Selected task: `M7-03` — improve error mapping in `error.rs`.
+Selected task: `M7-04` — centralize unsupported-feature capability decisions in `protocol/capability.rs`.
 
 Planned execution:
 
-1. Use `TODO.md` as the source of truth and treat `M7-03` as the first incomplete task.
-2. Treat the latest `[M7-02] Implement model routing` commit as completed context; only carry forward directly relevant routing/error-surface expectations.
-3. Inspect current `error.rs`, route handlers, provider clients, and protocol encoders/decoders to identify every path that emits local or upstream errors.
-4. Implement protocol-aware error formatting for Anthropic Messages and OpenAI Responses, including stable error type/category mapping and HTTP status selection.
-5. Preserve and translate upstream status codes plus retry/rate-limit headers, covering backend 4xx/5xx responses instead of only 4xx.
-6. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, then `cargo test --all --all-targets`.
-7. Update `TODO.md` with `[DONE] M7-03` and completion evidence, update this file at key milestones, commit, and stop.
+1. Use `TODO.md` as the source of truth and treat `M7-04` as the first incomplete task.
+2. Treat the latest `[M7-03] Improve error mapping` commit as completed context; no unfinished issue from that commit preempts `M7-04`.
+3. Inspect DESIGN §6.5 and the current IR-to-protocol encoders to find existing scattered drop / emulate / reject decisions.
+4. Add `src/protocol/capability.rs` with a centralized capability table for each `IR -> protocol` request direction and helper functions for extra-parameter filtering/rejection.
+5. Wire the existing Anthropic, Responses, and OpenAI Chat request encoders through the capability table without changing intended protocol output except where unsupported parameters should now be explicitly rejected.
+6. Add tests that lock drop / emulate / reject decisions, including the documented Responses `json_schema` to Anthropic tool-emulation policy.
+7. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, then `cargo test --all --all-targets`.
+8. Update `TODO.md` with `[DONE] M7-04` and completion evidence, update this file at key milestones, commit, and stop.
 
 Progress:
 
-- Identified `M7-03` as the first incomplete task.
-- Confirmed the latest commit is `[M7-02] Implement model routing`; no unfinished issue in that commit preempts `M7-03`.
+- Re-read `TODO.md` and found `M7-04` is now the first incomplete task.
 - Baseline validation before code changes passed: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Implemented protocol-aware error response formatting: generic, Anthropic Messages, and OpenAI Responses schemas now use protocol-specific error bodies and classification.
-- Preserved upstream non-success statuses for both 4xx and 5xx responses, including upstream body message extraction and Retry-After/rate-limit header forwarding/translation.
-- Wired `/v1/messages` and `/v1/responses` to return frontend-specific errors, including JSON extractor failures.
-- Added unit and route tests for Anthropic/Responses error bodies plus OpenAI↔Anthropic rate-limit header translation.
+- Implemented `src/protocol/capability.rs` as the central `IR -> protocol` feature decision table for pass-through, drop, emulate, and reject behavior.
+- Wired OpenAI Chat, Anthropic Messages, and OpenAI Responses request encoders through the capability table, including structured-output and reasoning-effort emulation paths.
+- Added tests covering capability decisions, extra filtering, Responses json_schema emulation to Anthropic tools, Chat/Responses structured-output translation, and unsupported structured-output/tool conflicts.
 - Completed validation after changes: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` all passed.
-- Updated `TODO.md` to mark `M7-03` `[DONE]` with completion evidence.
+- Updated `TODO.md` to mark `M7-04` `[DONE]` with completion evidence.
