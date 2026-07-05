@@ -73,10 +73,16 @@ src/stream/{mod.rs}
 - 已构建带 `TraceLayer::new_for_http()` 的 Router，并添加 `GET /health`，返回 `200 {"status":"ok"}`；新增单元测试覆盖该路由响应。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
-### M0-05 `[TODO]` 实现流式透传路由（passthrough）
+### [DONE] M0-05 实现流式透传路由（passthrough）
 加一条临时路由（如 `POST /passthrough`），用 `reqwest` 向配置的上游 URL 转发请求体，
 用 `reqwest::Response::bytes_stream()` 把响应体作为 `axum::body::Body` 流式返回，
 透传 `content-type`。目的：验证 axum + reqwest 流式链路字节无损。上游 URL 暂从环境变量读。
+
+完成记录：
+- 2026-07-06：已添加 `POST /passthrough` 临时路由，从 `LLM_PROXY_UPSTREAM_URL` 读取上游 URL，使用共享 `reqwest::Client` 将请求体转发到上游。
+- 已将上游响应的 status 与 `content-type` 透传给客户端，并用 `bytes_stream()` + `Body::from_stream()` 流式返回响应体；同时透传客户端请求的 `content-type` 到上游。
+- 新增单元测试覆盖请求体转发、响应字节无损、`content-type` 透传，以及缺少上游 URL 时的配置错误响应。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
 ### M0-RV `[TODO]` 【Review】M0 骨架
 确认：`cargo build` + `cargo clippy` 无 error；`/health` 可访问；passthrough 能流式转发一个真实
