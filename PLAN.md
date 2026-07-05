@@ -181,7 +181,9 @@ M7 加固（错误/鉴权/限流/配置/observability）
 ## 横切关注点（贯穿所有里程碑）
 
 - **测试策略**：优先"录制真实 client 请求 + 后端响应 → 快照比对"。reasoning 保真、tool-call
-  流式重组、ID 映射是 🔒 必须锁死的三块。
+  流式重组、ID 映射是 🔒 必须锁死的三块。**真实世界联调**（真实 Claude Code / Codex + 真实
+  后端）见 [TESTING.md](./TESTING.md)；`.envrc`（已 gitignore）预置了 DeepSeek / Responses /
+  Anthropic 三组真实后端凭据，供各 `-RV` 里程碑验收使用，凭据禁止写进任何入库文件。
 - **无状态铁律**：任何里程碑不得引入会话状态存储；唯一例外是 M4 预留的降级接口（默认关闭）。
 - **profile 可扩展**：新增"OpenAI 兼容"后端（Groq/Together/月之暗面…）应只需加 profile，不改核心。
 

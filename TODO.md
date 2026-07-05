@@ -6,7 +6,8 @@
 > - 任务按执行顺序排列，编号形如 `M1-01`。
 > - 标题中的 `[TODO]` 是状态标记，执行完成后由 agent 更新为 `[DONE]`（或 `[BLOCKED]` 并注明原因）。
 > - 每个里程碑最后有一个 `-RV` review 任务，确认该里程碑实现正确且未偏离 [DESIGN.md](./DESIGN.md) 目标。
-> - 参考文档：`DESIGN.md`（设计与约束）、`PLAN.md`（里程碑）。文中 `DESIGN §x` 指 DESIGN.md 章节。
+> - 参考文档：`DESIGN.md`（设计与约束）、`PLAN.md`（里程碑）、`TESTING.md`（测试与真实世界联调）。文中 `DESIGN §x` 指 DESIGN.md 章节。
+> - **真实世界联调**：`.envrc`（已 gitignore）预置了 DeepSeek / Responses / Anthropic 三组真实后端凭据，供 `-RV` 里程碑做真实客户端联调。接法与安全铁律见 `TESTING.md`。凭据禁止写进任何入库文件。
 >
 > **全局铁律**
 > - **无状态**：任何任务不得引入会话状态存储（唯一例外见 M4-05，默认关闭）。
@@ -456,6 +457,16 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 
 ### M7-08 `[TODO]` README 与部署文档
 写 `README.md`：配置示例、如何把 Claude Code / Codex 指向本网关、支持的后端与 profile、已知限制。
+指向 `TESTING.md`（测试与真实世界联调）。
+
+### M7-09 `[TODO]` GitHub CI pipeline
+在 `.github/workflows/ci.yml` 建 GitHub Actions pipeline，push / PR 到 `main` 时触发：
+- 步骤：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets`。
+- 用稳定版 Rust（edition 2024 需足够新的工具链），并缓存 cargo registry / target 加速。
+- **只跑不依赖网络的测试**：绝不加 `--ignored`。用真实 `codex` / `claude` CLI + 真实后端凭据的
+  端到端测试（`TESTING.md` §5）都标了 `#[ignore]`，CI 环境无这些 CLI / 无 `.envrc` 凭据，
+  必须默认跳过，避免失败与凭据泄露。
+参考 `TESTING.md` §1（CI 跑的测试范围）与 §5.4（e2e 测试为何默认忽略）。
 
 ### M7-RV `[TODO]` 【Review】M7 加固 + 项目验收
 确认：多后端配置化可用、错误可读、有基本可观测性、回归套件通过。
