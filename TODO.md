@@ -325,10 +325,17 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 已按 profile 应用 `param_blocklist` 静默丢弃 DeepSeek 不支持参数，保留/归一 `reasoning_effort`，并在 DeepSeek profile 下拒绝 `n > 1`；新增单元测试覆盖严格交替规整、多 tool_result、参数丢弃、reasoning 回传策略与多 choice 拒绝。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-08 `[TODO]` 装配链 3 端到端路由
+### [DONE] M2-08 装配链 3 端到端路由
 加 `POST /v1/messages`（Anthropic 端点）：解析请求→IR→按 profile 构造 Chat 请求→调 DeepSeek→
 流式或非流式响应经上述编码器返回。鉴权头翻译（`x-api-key`+`anthropic-version` ↔ `Bearer`，DESIGN §6.6）。
 `max_tokens` 默认值处理（Anthropic 必填 → 给 Chat 合理默认）。system prompt hoist。
+
+完成记录：
+- 2026-07-06：已在 Axum router 装配 `POST /v1/messages`，将 Anthropic Messages 请求解析为 IR，应用 `max_tokens` 默认值后按 DeepSeek profile 编码为 Chat Completions 请求，并调用配置的 Chat-compatible 上游。
+- 已实现后端 Bearer 鉴权装配：优先使用 `DEEPSEEK_API_KEY`，测试/本地可用 `LLM_PROXY_CHAT_COMPLETIONS_URL` 指向 mock 或兼容上游；`LLM_PROXY_ANTHROPIC_DEFAULT_MAX_TOKENS` 可覆盖默认输出上限。
+- 已将非流式 Chat 响应解析为 IR 后编码为 Anthropic message JSON；流式 Chat SSE 经 `parse_openai_chat_sse` → `chat_sse_to_ir_events` → `ir_events_to_anthropic_sse` 转为 Anthropic SSE 返回。
+- 新增 route 测试覆盖 system prompt hoist、默认 `max_tokens`、后端 Authorization Bearer 翻译、非流式响应编码、流式 SSE 转换与缺少后端 API key 的配置错误。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-09 `[TODO]` 链 3 集成测试
 用 `wiremock` mock DeepSeek 后端，录制的 Claude Code 请求样本打到 `/v1/messages`，
