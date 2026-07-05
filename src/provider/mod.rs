@@ -8,6 +8,7 @@
 use crate::ir::message::EchoPolicy;
 
 pub mod deepseek;
+pub mod responses_backend;
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const EMPTY_PARAM_BLOCKLIST: &[&str] = &[];
