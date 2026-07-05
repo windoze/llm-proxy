@@ -179,13 +179,20 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - 已在代码注释中标注 DeepSeek 官方文档版本不一致，并说明以 `thinking_mode` 新页规则为准；新增单元测试覆盖每条 profile 规则。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M1-06 `[TODO]` OpenAI Chat/DeepSeek 请求解析 (`protocol/openai_chat/decode.rs`)
+### [DONE] M1-06 OpenAI Chat/DeepSeek 请求解析 (`protocol/openai_chat/decode.rs`)
 实现 `chat_request_to_ir(body:&Value, profile:&dyn CapabilityProfile) -> Result<IrRequest>`：
 - messages 中 `role:system` → `IrRequest.system`
 - `tool_calls`（assistant）→ `ContentBlock::ToolUse`；`role:tool` 消息 → `ToolResult`（配 `tool_call_id`）
 - `reasoning_content` → `ContentBlock::Thinking{source:DeepSeek, echo_policy: profile 决定}`
 - `tools`/`tool_choice`/`max_tokens`/`temperature` 等映射到 IR
 覆盖 DESIGN §4.1(DeepSeek 条件回传)、§6.3(工具挂载)。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/openai_chat/decode.rs` 并在 `protocol/openai_chat` 暴露 decoder。
+- 已实现 `chat_request_to_ir`：支持 system/developer hoist、user/assistant/tool 消息解析、assistant `tool_calls` → `ToolUse`、`role:tool` → `ToolResult`、DeepSeek `reasoning_content` → `Thinking{source:DeepSeek, echo_policy: profile.reasoning_echo_policy(...)}`。
+- 已解析 `tools`、`tool_choice`、`max_tokens`/`max_completion_tokens`、`temperature`、`top_p`、`top_k`、`stop`、`stream` 与 provider `extra`；DeepSeek profile blocklist 参数会静默 drop，`reasoning_effort` 会按 profile 归一化，`n>1` 在不支持多 choice 的 profile 下返回不支持特性错误。
+- 新增单元测试覆盖 DeepSeek reasoning + tool_calls + tool result 映射、OpenAI 常规采样参数保留、DeepSeek `n>1` 拒绝、非法 tool arguments JSON 报错。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M1-07 `[TODO]` OpenAI Chat/DeepSeek 响应解析 (`protocol/openai_chat/decode.rs`)
 实现 `chat_response_to_ir(body:&Value) -> Result<IrResponse>`（非流式）：

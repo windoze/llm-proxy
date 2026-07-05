@@ -1,3 +1,5 @@
 //! OpenAI Chat Completions-compatible protocol adapter.
 //!
-//! DeepSeek-compatible decoding and encoding are added in later milestones.
+//! DeepSeek-compatible request decoding starts from this milestone.
+
+pub mod decode;

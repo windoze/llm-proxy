@@ -1,33 +1,19 @@
-## Execution Plan
+# Execution Plan
 
-I will complete exactly the first incomplete task listed in `TODO.md`, using `TODO.md` as the source of truth.
+## Reasoning summary
+- `TODO.md` is the authoritative task list, and the first heading not prefixed with `[DONE]` is the only task to execute in this invocation.
+- I will not perform broad triage before selecting that task. I will only inspect history or related files when needed to understand or validate the selected task.
+- If the selected task is blocked by a concrete unscheduled prerequisite, I will add the minimum required prerequisite task to `TODO.md`, leave the current task incomplete, commit that bookkeeping, and stop.
+- If implementation proceeds, I will complete the selected task as written, validate it with the repository's existing formatting/lint/test workflow, update the completion record, commit the changes, and stop without starting the next task.
 
-1. Read `TODO.md` to identify the first task whose title is not prefixed with `[DONE]`.
-2. Review the selected task body, any directly relevant latest-commit context, and only the design/code areas needed for that task.
-3. Implement the selected task without broad unrelated triage or workaround behavior.
-4. Run formatting, linting, and tests required by the task and repository conventions.
-5. If an unscheduled blocking issue or test failure appears, fix it if in scope; otherwise add the minimum prerequisite task to `TODO.md`, commit that scheduling change, and stop.
-6. If the task is completed, update `TODO.md` by prefixing the task title with `[DONE]` and adding a completion record.
-7. Commit all task-related changes with a descriptive message, then stop without starting the next task.
-
-## Current Task
-
-First incomplete task identified: `M1-05` — implement the DeepSeek provider profile in `provider/deepseek.rs`.
-
-Execution steps for this task:
-
-1. Inspect the existing provider module, IR echo-policy type, DESIGN §5, and the latest commit message for directly relevant unfinished work.
-2. Add a `provider::deepseek` module and implement `CapabilityProfile` for a `DeepSeek` profile with the exact blocklist, reasoning effort normalization, echo policy, multiple-choice support, thinking-model detection, and base URL required by `TODO.md`.
-3. Add the required code comment documenting the DESIGN §5 warning about official documentation version inconsistency and the `thinking_mode` page being authoritative.
-4. Add focused tests for every DeepSeek profile rule.
-5. Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. Mark `M1-05` as `[DONE]` in `TODO.md`, add a completion record, update this progress file, commit, and stop.
-
-## Progress
-
-- Selected `M1-05` as the first incomplete task.
-- Added `src/provider/deepseek.rs` and wired `provider::deepseek` into `src/provider/mod.rs`.
-- Added focused DeepSeek profile tests covering base URL, model mapping, parameter blocklist, reasoning effort normalization, echo policy, multiple-choice support, and thinking-model detection.
-- Completed validation with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked `M1-05` as `[DONE]` in `TODO.md` with a completion record.
-- Next step: commit the task changes and stop.
+## Step-by-step plan
+1. Read `TODO.md` and identify the first incomplete task using the `[DONE]` prefix rule. **Completed:** first incomplete task is `M1-06`.
+2. Check the latest commit message only for unfinished work directly relevant to that selected task. **Completed:** latest commit is `[M1-05] Implement DeepSeek profile`; no unfinished issue was mentioned.
+3. Read the selected task details and immediately relevant files: OpenAI Chat protocol module, IR request/message types, provider profile trait and DeepSeek profile, error type, and DESIGN sections for DeepSeek request/tool/reasoning mapping.
+4. Implement `protocol/openai_chat/decode.rs` with `chat_request_to_ir(body: &Value, profile: &dyn CapabilityProfile) -> Result<IrRequest>`. **Completed.**
+5. Ensure mappings cover system messages, normal message content, assistant `tool_calls`, `role:tool` results, DeepSeek `reasoning_content`, tools, tool choice, sampling/max-token/stop/stream parameters, and provider-specific `extra` handling with profile blocklist behavior. **Completed.**
+6. Add focused unit tests for request parsing behavior introduced by M1-06. **Completed.**
+7. Run `cargo fmt --all`, then `cargo clippy --all-targets -- -D warnings`, then `cargo test --all --all-targets`. **Completed; all passed.**
+8. Mark `M1-06` as `[DONE]` in `TODO.md` and update its completion record with implementation and validation notes. **Completed.**
+9. Commit all task-related changes, including this plan file. **Pending.**
+10. Stop after committing `M1-06`; do not start `M1-07`.
