@@ -11,5 +11,5 @@ Steps:
 4. Cover response content, DeepSeek reasoning, tool calls, finish reasons, and usage/cache token fields with focused tests. **Completed.**
 5. Run the required formatting, linting, and tests in the requested order, fixing any failures that are not already explicitly scheduled. **Completed.**
 6. Update `TODO.md` by prefixing M1-07 with `[DONE]` and filling in its completion record; update `PLAN.md` only if phase-level planning changes. **Completed; no PLAN.md change needed.**
-7. Commit all changes for this task with a clear task-specific message and the required co-author trailer. **Pending.**
+7. Commit all changes for this task with a clear task-specific message and the required co-author trailer. **Completed in commit `7f120fc`.**
 8. Stop after this one task is complete.
