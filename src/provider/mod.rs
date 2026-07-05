@@ -7,6 +7,7 @@
 
 use crate::ir::message::EchoPolicy;
 
+pub mod anthropic_backend;
 pub mod deepseek;
 pub mod responses_backend;
 

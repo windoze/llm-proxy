@@ -1,25 +1,30 @@
-## Execution plan
+# Execution Plan
 
-1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Check the latest commit message only for directly relevant unfinished work tied to that task.
-3. Inspect the task requirements, affected files, and existing validation commands.
-4. Implement the task exactly as specified, adding prerequisite TODO entries only if a concrete blocker makes direct completion impossible.
-5. Run formatting, linting, and tests required by the task and repository conventions.
-6. Update `TODO.md` with a `[DONE]` prefix and completion record if the task is completed, or record any blocker/prerequisite if it cannot be completed.
-7. Commit all task-related changes, then stop without starting the next task.
+I will follow `TODO.md` as the source of truth, complete only the first task whose heading is not prefixed with `[DONE]`, validate the result, update the task record, commit the completed work, and stop.
 
-## Current task
+1. Read `TODO.md` to identify the first incomplete task and its validation requirements.
+2. Check the latest commit message only for directly relevant unfinished work tied to that selected task.
+3. Inspect the task-relevant code, tests, and documentation before editing.
+4. Implement the selected task without changing unrelated behavior or working around spec mismatches.
+5. Run formatting, linting, and relevant/full tests required by the task and repository policy.
+6. If a blocking prerequisite is discovered, update `TODO.md` with the minimum necessary prerequisite task, leave the current task incomplete, commit that bookkeeping, and stop.
+7. If the task is completed, prefix its `TODO.md` heading with `[DONE]`, update its completion record with the validation performed, commit all related changes, and stop.
 
-- Selected first incomplete task: `M5-RV` — review M5 chain 4 plus real integration.
-- Latest commit: `[M5-06] Wire Anthropic messages to Responses backend`; no unfinished issue was mentioned in the commit subject/body, and it is directly relevant as the implementation under review.
-- Review focus confirmed: M5 requires Responses `encrypted_content` to round-trip losslessly through an Anthropic `thinking.signature` envelope, plus rich stream index/tool-call correctness.
-- Local prerequisites found: `claude`, `codex`, `.envrc`, `OPENAI_API_ENDPOINT`, and `OPENAI_API_KEY` are present; values must not be printed or committed.
-- Rust validation passed: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Live M5 check found a real protocol-boundary blocker: Claude Code sends Anthropic-only `output_config`; the current Anthropic → IR → Responses path forwarded it unchanged, and the Responses backend rejected it with `unknown_parameter`.
-- Fixed extra passthrough: Responses request encoding now forwards only Responses-native extra fields, preserving supported extras such as `metadata`/`store` while dropping Anthropic-only fields before backend submission.
-- Live retry reached the second turn and confirmed tool-use execution, then exposed a second real Responses request mismatch: generated `function_call_output` items included `is_error`, which the backend rejects. The encoder now omits generated `is_error` fields while still decoding optional inbound `is_error` into IR.
-- Raw M5 check showed that simply dropping Claude Code `output_config` made the tool-use round trip work but did not request Responses reasoning. Captured Claude Code request shape uses `output_config: {"effort":"high"}` plus top-level `thinking`; direct backend probing confirmed Responses accepts `reasoning: {"effort":"high"}` and returns reasoning items with `encrypted_content`.
-- Fixed reasoning mapping: Anthropic/Claude `output_config.effort` now maps into Responses `reasoning.effort` while unsupported Anthropic-only fields remain filtered.
-- Final live validation passed: Claude Code 2.1.200 → local `/v1/messages` → real Responses backend `gpt-5.5` completed a two-turn Bash tool-use flow without 400.
-- Final raw real-backend validation passed: a Responses reasoning item was emitted as Anthropic `thinking.signature` on turn 2, then sent back on turn 3 and accepted by the backend, confirming signature → encrypted_content round trip.
-- `TODO.md` has been updated with `[DONE] M5-RV` and completion records. Next step is committing the task changes.
+## Current Task
+
+First incomplete task: `M6-01` — Anthropic backend client (`provider/anthropic_backend.rs`).
+
+Execution steps for this task:
+
+1. Review the existing backend client patterns, especially `provider/responses_backend.rs`, shared error handling, and route/client call sites.
+2. Add an Anthropic backend client module that validates endpoint/API key/version, sends JSON requests with `x-api-key` and `anthropic-version`, preserves request body fields, and returns the raw `reqwest::Response` for non-buffered streaming via `bytes_stream()`.
+3. Expose the module from `provider::mod`.
+4. Add unit tests covering header translation, invalid configuration, upstream error propagation, JSON POST shape, and streaming response consumption.
+5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. Mark `M6-01` as `[DONE]` in `TODO.md`, record validation, commit the task changes, and stop.
+
+## Progress
+
+- Implemented `src/provider/anthropic_backend.rs` and exposed it from `provider::mod`.
+- Added tests for JSON body preservation, invalid configuration, Anthropic auth/version headers, streaming response consumption, and upstream error body propagation.
+- Validation passed: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
