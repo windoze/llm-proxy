@@ -1,0 +1,30 @@
+---
+source: src/protocol/openai_chat/decode.rs
+expression: "serde_json::to_string_pretty(&response).unwrap()"
+---
+{
+  "id": "chatcmpl_2",
+  "model": "deepseek-reasoner",
+  "content": [
+    {
+      "thinking": {
+        "text": "No tool is needed because the answer is direct.",
+        "opaque": null,
+        "source": "deepseek",
+        "echo_policy": "only_with_tool_call"
+      }
+    },
+    {
+      "text": {
+        "text": "The capital of France is Paris."
+      }
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 8,
+    "cache_read": 4,
+    "cache_write": 8
+  }
+}

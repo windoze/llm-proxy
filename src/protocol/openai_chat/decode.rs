@@ -880,6 +880,10 @@ mod tests {
 
         let response = chat_response_to_ir(&body).unwrap();
 
+        insta::assert_snapshot!(
+            "deepseek_response_with_reasoning_and_tool_calls",
+            serde_json::to_string_pretty(&response).unwrap()
+        );
         assert_eq!(
             response,
             IrResponse {
@@ -907,6 +911,62 @@ mod tests {
                     output_tokens: 9,
                     cache_read: Some(10),
                     cache_write: Some(32),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_deepseek_response_without_tool_calls_as_droppable_reasoning() {
+        let body = json!({
+            "id": "chatcmpl_2",
+            "model": "deepseek-reasoner",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "No tool is needed because the answer is direct.",
+                    "content": "The capital of France is Paris."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 8,
+                "total_tokens": 20,
+                "prompt_cache_hit_tokens": 4,
+                "prompt_cache_miss_tokens": 8
+            }
+        });
+
+        let response = chat_response_to_ir(&body).unwrap();
+
+        insta::assert_snapshot!(
+            "deepseek_response_without_tool_calls",
+            serde_json::to_string_pretty(&response).unwrap()
+        );
+        assert_eq!(
+            response,
+            IrResponse {
+                id: "chatcmpl_2".to_owned(),
+                model: "deepseek-reasoner".to_owned(),
+                content: vec![
+                    ContentBlock::Thinking(Thinking {
+                        text: Some("No tool is needed because the answer is direct.".to_owned()),
+                        opaque: None,
+                        source: Provider::DeepSeek,
+                        echo_policy: EchoPolicy::OnlyWithToolCall,
+                    }),
+                    ContentBlock::Text {
+                        text: "The capital of France is Paris.".to_owned()
+                    },
+                ],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 12,
+                    output_tokens: 8,
+                    cache_read: Some(4),
+                    cache_write: Some(8),
                 },
             }
         );

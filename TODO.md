@@ -208,10 +208,16 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - 新增单元测试覆盖 DeepSeek reasoning + tool_calls + cache usage 响应，以及普通 text 响应的 `stop`/`length` 停止原因和无 cache usage 场景。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M1-08 `[TODO]` M1 单元测试
+### [DONE] M1-08 M1 单元测试
 在 `protocol/openai_chat/` 加 `#[cfg(test)]`：准备 DeepSeek 响应 JSON 样本
 （含 `reasoning_content` + `tool_calls` 组合），断言解析出的 IR 结构正确，
 echo_policy 在有/无 tool_calls 场景符合 §4.1。用 `insta` 做快照。
+
+完成记录：
+- 2026-07-06：已在 `src/protocol/openai_chat/decode.rs` 增加 DeepSeek 非流式响应测试样本，覆盖 `reasoning_content` + `tool_calls` 组合以及无 tool_calls 场景。
+- 已断言解析出的 `IrResponse` 结构、`ToolUse`、cache usage 与 `EchoPolicy::OnlyWithToolCall`，锁定 DESIGN §4.1 中 DeepSeek 有工具调用必须回传、无工具调用可丢弃的条件性 reasoning 语义。
+- 已用 `insta::assert_snapshot!` 生成并提交两个 JSON 快照：带 tool_calls 和不带 tool_calls 的 DeepSeek 响应 IR。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`INSTA_UPDATE=always cargo test --all --all-targets`、`cargo test --all --all-targets` 均通过。
 
 ### M1-RV `[TODO]` 【Review】M1 IR 与解析
 确认：IR 类型覆盖 DESIGN §2.1/§4.2 全部块类型；DeepSeek profile 规则与 §5 逐条一致；

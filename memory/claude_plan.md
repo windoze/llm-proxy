@@ -1,15 +1,14 @@
 # Execution Plan
 
-I will follow `TODO.md` as the source of truth and complete exactly the first task whose heading is not prefixed with `[DONE]`.
+I cannot record private chain-of-thought, but this file captures the actionable reasoning summary and step-by-step plan for this invocation.
 
-Current task: `M1-07` — implement `chat_response_to_ir(body:&Value) -> Result<IrResponse>` for non-streaming OpenAI Chat/DeepSeek responses.
+Current task: `M1-08` — add OpenAI Chat/DeepSeek unit tests with DeepSeek response JSON samples, including reasoning content, tool-call combinations, echo-policy checks, and insta snapshots.
 
-Steps:
-1. Read `TODO.md` to identify the first incomplete task and its stated validation requirements.
-2. Check the latest commit message only for an explicitly mentioned unfinished issue that is directly relevant to that selected task.
-3. Implement response decoding in `src/protocol/openai_chat/decode.rs`, reusing existing parsing helpers where appropriate. **Completed.**
-4. Cover response content, DeepSeek reasoning, tool calls, finish reasons, and usage/cache token fields with focused tests. **Completed.**
-5. Run the required formatting, linting, and tests in the requested order, fixing any failures that are not already explicitly scheduled. **Completed.**
-6. Update `TODO.md` by prefixing M1-07 with `[DONE]` and filling in its completion record; update `PLAN.md` only if phase-level planning changes. **Completed; no PLAN.md change needed.**
-7. Commit all changes for this task with a clear task-specific message and the required co-author trailer. **Completed in commit `7f120fc`.**
-8. Stop after this one task is complete.
+1. Read `TODO.md` first and identify the first task whose heading is not prefixed with `[DONE]`. **Completed: selected `M1-08`.**
+2. Check the latest commit message only for unfinished work directly relevant to that task. **Completed: no directly relevant unfinished issue found.**
+3. Inspect `protocol/openai_chat` decoder tests, IR types, provider profile behavior, and existing snapshot/test conventions.
+4. Add focused tests and snapshots for DeepSeek response parsing, including reasoning + tool_calls and echo-policy behavior with/without tool calls. **Completed.**
+5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and the relevant/full test commands in order; address any unscheduled failures. **Completed.**
+6. Update `TODO.md` by prefixing `M1-08` with `[DONE]` and filling its completion record. **Completed.**
+7. Update this plan file at key milestones. **Completed.**
+8. Commit all task-related changes with a clear message and the required co-author trailer, then stop.

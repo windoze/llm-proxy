@@ -1,0 +1,39 @@
+---
+source: src/protocol/openai_chat/decode.rs
+expression: "serde_json::to_string_pretty(&response).unwrap()"
+---
+{
+  "id": "chatcmpl_1",
+  "model": "deepseek-reasoner",
+  "content": [
+    {
+      "thinking": {
+        "text": "I need the weather tool.",
+        "opaque": null,
+        "source": "deepseek",
+        "echo_policy": "only_with_tool_call"
+      }
+    },
+    {
+      "text": {
+        "text": "Calling the weather tool."
+      }
+    },
+    {
+      "tool_use": {
+        "id": "call_1",
+        "name": "lookup_weather",
+        "input": {
+          "city": "Paris"
+        }
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+    "input_tokens": 42,
+    "output_tokens": 9,
+    "cache_read": 10,
+    "cache_write": 32
+  }
+}
