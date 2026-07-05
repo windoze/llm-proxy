@@ -1,22 +1,23 @@
-## Current Task
+# Execution Plan
 
-Selected first incomplete task: `M3-02` — Responses non-streaming response encoding in `protocol/responses/encode.rs`.
+## Scope
+Work on exactly the first incomplete task listed in `TODO.md`, using `TODO.md` as the authoritative ordering and completion record.
 
-## Execution Plan
-
-1. [DONE] Inspect existing IR response/content types and nearby encoders, especially Anthropic and OpenAI Chat response encoders, to match project conventions.
-2. [DONE] Review relevant DESIGN/PLAN notes for Responses response shape, stop reason mapping, reasoning items, function calls, and usage fields.
-3. [DONE] Implement `ir_response_to_responses(resp: &IrResponse) -> Value` and expose it from `protocol::responses`.
-4. [DONE] Add focused unit tests covering text, reasoning, function calls, stop/status mapping, and usage serialization.
-5. [DONE] Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. [DONE] Mark `M3-02` as `[DONE]` in `TODO.md` with a completion record.
-7. [IN PROGRESS] Review the final diff, commit the task changes with the required co-author trailer, and stop.
+## Steps
+1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
+2. Check the latest commit message for any explicitly unfinished issue directly relevant to that task.
+3. Inspect only the files needed to understand and implement that task.
+4. Implement the task completely, preserving existing behavior outside the requested scope.
+5. Run formatting, linting, and relevant tests in the required order; fix any observed unscheduled failures or add the minimum prerequisite task if a concrete blocker prevents completion.
+6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and filling its completion record.
+7. Update this file at major milestones.
+8. Commit all task-related changes with a descriptive message, including the required co-author trailer.
+9. Stop after completing this single task.
 
 ## Progress
-
-- Implemented `src/protocol/responses/encode.rs` with Responses response object, output item encoding, status/incomplete mapping, reasoning `encrypted_content` preservation, function calls, tool outputs, and usage serialization.
-- Exposed `protocol::responses::encode` from `src/protocol/responses/mod.rs`.
-- Ran `cargo fmt --all`.
-- Ran `cargo clippy --all-targets -- -D warnings`.
-- Ran `cargo test --all --all-targets`.
-- Marked `M3-02` as `[DONE]` in `TODO.md` with a completion record.
+- Created initial execution plan.
+- Identified first incomplete task: `M3-03` (`IR event -> Responses SSE encoding` in `protocol/responses/stream.rs`).
+- Reviewed the existing Anthropic SSE encoder, Responses non-streaming encoder, IR event model, and OpenAI SDK stream event shapes needed for `M3-03`.
+- Added `protocol::responses::stream` with a stateful IR-event to Responses SSE encoder and unit tests for text, reasoning, tool-call argument streaming, and ordering validation.
+- Validation passed after implementation: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+- Marked `M3-03` as `[DONE]` in `TODO.md` with its completion record.

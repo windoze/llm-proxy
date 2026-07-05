@@ -390,12 +390,20 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 新增单元测试覆盖 reasoning/text/function_call/usage 编码、连续文本合并、无 `encrypted_content` reasoning、stop/status 映射与 tool result 编码。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M3-03 `[TODO]` IR event → Responses SSE 编码 (`protocol/responses/stream.rs`) 🔒
+### [DONE] M3-03 IR event → Responses SSE 编码 (`protocol/responses/stream.rs`) 🔒
 实现 `IrEvent` 流 → Responses SSE：
 `response.created`/`response.in_progress`；`response.output_item.added`（新 block）；
 `response.output_text.delta`；`response.function_call_arguments.delta`/`.done`（tool 参数碎片）；
 `response.output_item.done`；`response.completed`（含 usage）。
 处理 reasoning item 的流式事件（thinking → reasoning delta）。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/responses/stream.rs` 并从 `protocol::responses` 暴露 Responses SSE 编码模块。
+- 已实现 `IrEvent` → Responses SSE 的状态机编码：`MessageStart` 生成 `response.created`/`response.in_progress`，block start/stop 生成 `response.output_item.added`/`response.output_item.done`，text delta 生成 `response.output_text.delta`，tool 参数碎片生成 `response.function_call_arguments.delta`/`.done`，terminal event 生成包含 output 与 usage 的 `response.completed`。
+- 已覆盖 thinking/reasoning 流式编码：`ThinkingDelta` 会编码为 Responses reasoning item 的 `response.reasoning_text.delta`，并在 block stop 时输出 reasoning text/content part/item done 事件。
+- 编码器会校验 message lifecycle、block index 递增、delta 类型与已开启 block 匹配、terminal delta 与 message stop 顺序，避免 Responses SSE 序列错位。
+- 新增单元测试覆盖 reasoning/text/tool-call lifecycle、SSE wrapper 多帧输出、非连续 block index、错误类型 delta、缺少 terminal delta 的拒绝路径。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M3-04 `[TODO]` Responses tool ID 映射与配对 🔒
 实现 `tool_call_id`(Chat) ↔ Responses `call_id` 映射；`function_call`/`function_call_output` 配对链

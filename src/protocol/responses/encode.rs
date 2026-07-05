@@ -181,18 +181,18 @@ fn encode_tool_output(content: &[ContentBlock]) -> Value {
     )
 }
 
-fn item_id(prefix: &str, response_id: &str, output_index: usize) -> String {
+pub(super) fn item_id(prefix: &str, response_id: &str, output_index: usize) -> String {
     format!("{prefix}_{response_id}_{output_index}")
 }
 
-fn encode_status(stop_reason: &StopReason) -> &'static str {
+pub(super) fn encode_status(stop_reason: &StopReason) -> &'static str {
     match stop_reason {
         StopReason::MaxTokens | StopReason::Other(_) => "incomplete",
         StopReason::EndTurn | StopReason::StopSequence | StopReason::ToolUse => "completed",
     }
 }
 
-fn encode_incomplete_details(stop_reason: &StopReason) -> Value {
+pub(super) fn encode_incomplete_details(stop_reason: &StopReason) -> Value {
     match stop_reason {
         StopReason::MaxTokens => json!({ "reason": "max_output_tokens" }),
         StopReason::Other(reason) => json!({ "reason": reason }),
@@ -200,7 +200,7 @@ fn encode_incomplete_details(stop_reason: &StopReason) -> Value {
     }
 }
 
-fn encode_usage(usage: &Usage) -> Value {
+pub(super) fn encode_usage(usage: &Usage) -> Value {
     json!({
         "input_tokens": usage.input_tokens,
         "input_tokens_details": {
