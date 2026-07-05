@@ -31,9 +31,10 @@ use crate::{
         },
     },
     provider::{
-        CapabilityProfile, anthropic_backend::AnthropicBackendClient,
-        anthropic_cache::AnthropicCacheControlInjection, deepseek::DeepSeek,
+        anthropic_backend::AnthropicBackendClient,
+        anthropic_cache::AnthropicCacheControlInjection,
         responses_backend::ResponsesBackendClient,
+        router::{FrontendEndpoint, ModelRouter},
     },
     stream::{
         anthropic_decoder::anthropic_sse_to_ir_events,
@@ -52,14 +53,7 @@ mod reasoning;
 mod stream;
 
 const PASSTHROUGH_UPSTREAM_URL_ENV: &str = config::PASSTHROUGH_UPSTREAM_URL_ENV;
-const CHAT_COMPLETIONS_URL_ENV: &str = config::CHAT_COMPLETIONS_URL_ENV;
 const DEEPSEEK_API_KEY_ENV: &str = config::DEEPSEEK_API_KEY_ENV;
-const OPENAI_API_ENDPOINT_ENV: &str = config::OPENAI_API_ENDPOINT_ENV;
-const OPENAI_API_KEY_ENV: &str = config::OPENAI_API_KEY_ENV;
-const ANTHROPIC_MESSAGES_BACKEND_ENV: &str = config::ANTHROPIC_MESSAGES_BACKEND_ENV;
-const RESPONSES_BACKEND_ENV: &str = config::RESPONSES_BACKEND_ENV;
-const ANTHROPIC_BASE_URL_ENV: &str = config::ANTHROPIC_BASE_URL_ENV;
-const ANTHROPIC_AUTH_TOKEN_ENV: &str = config::ANTHROPIC_AUTH_TOKEN_ENV;
 #[cfg(test)]
 const DEFAULT_ANTHROPIC_VERSION: &str = config::DEFAULT_ANTHROPIC_VERSION;
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = config::DEFAULT_ANTHROPIC_MAX_TOKENS;
@@ -69,79 +63,29 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = config::DEFAULT_ANTHROPIC_MAX_TOKENS;
 struct AppState {
     http_client: reqwest::Client,
     passthrough_upstream_url: Option<String>,
-    chat_completions_url: String,
-    chat_api_key: Option<String>,
-    responses_endpoint: Option<String>,
-    responses_api_key: Option<String>,
-    anthropic_messages_backend: Option<String>,
-    responses_backend: Option<String>,
-    anthropic_base_url: Option<String>,
-    anthropic_auth_token: Option<String>,
-    anthropic_version: String,
-    anthropic_default_model: Option<String>,
+    router: ModelRouter,
     anthropic_default_max_tokens: Option<u32>,
     anthropic_cache_control: AnthropicCacheControlInjection,
 }
 
 impl AppState {
     fn from_config(config: config::Config) -> Self {
-        let deepseek = DeepSeek;
-        let chat_backend = config
-            .backend("deepseek")
-            .filter(|backend| backend.kind == Some(config::BackendKind::Chat))
-            .or_else(|| config.first_backend_of_kind(config::BackendKind::Chat));
-        let responses_backend = config
-            .backend("responses")
-            .filter(|backend| backend.kind == Some(config::BackendKind::Responses))
-            .or_else(|| config.first_backend_of_kind(config::BackendKind::Responses));
-        let anthropic_backend = config
-            .backend("anthropic")
-            .filter(|backend| backend.kind == Some(config::BackendKind::Anthropic))
-            .or_else(|| config.first_backend_of_kind(config::BackendKind::Anthropic));
         let anthropic_cache_control = if config.switches.anthropic_cache_injection {
             AnthropicCacheControlInjection::EphemeralBreakpoints
         } else {
             AnthropicCacheControlInjection::Disabled
         };
+        let passthrough_upstream_url = config.passthrough_upstream_url.clone();
+        let anthropic_default_max_tokens = config.anthropic_default_max_tokens;
 
         Self {
             http_client: reqwest::Client::new(),
-            passthrough_upstream_url: config.passthrough_upstream_url.clone(),
-            chat_completions_url: chat_backend
-                .and_then(config::BackendConfig::chat_completions_url)
-                .unwrap_or_else(|| default_chat_completions_url(&deepseek)),
-            chat_api_key: chat_backend.and_then(|backend| backend.api_key.clone()),
-            responses_endpoint: responses_backend
-                .and_then(config::BackendConfig::responses_endpoint),
-            responses_api_key: responses_backend.and_then(|backend| backend.api_key.clone()),
-            anthropic_messages_backend: config.routing.anthropic_messages_backend.clone(),
-            responses_backend: config.routing.responses_backend.clone(),
-            anthropic_base_url: anthropic_backend
-                .and_then(config::BackendConfig::anthropic_endpoint_base),
-            anthropic_auth_token: anthropic_backend.and_then(|backend| backend.api_key.clone()),
-            anthropic_version: anthropic_backend
-                .and_then(|backend| backend.anthropic_version.clone())
-                .unwrap_or_else(|| config::DEFAULT_ANTHROPIC_VERSION.to_owned()),
-            anthropic_default_model: anthropic_backend
-                .and_then(|backend| backend.default_model.clone()),
-            anthropic_default_max_tokens: config
-                .anthropic_default_max_tokens
-                .or_else(|| anthropic_backend.and_then(|backend| backend.default_max_tokens)),
+            passthrough_upstream_url,
+            router: ModelRouter::new(config),
+            anthropic_default_max_tokens,
             anthropic_cache_control,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AnthropicMessagesBackend {
-    Chat,
-    Responses,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenAiResponsesBackend {
-    Chat,
-    Anthropic,
 }
 
 /// Health-check payload returned by `GET /health`.
@@ -239,13 +183,19 @@ async fn anthropic_messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> error::Result<Response> {
-    let profile = DeepSeek;
     let mut ir_request = anthropic_request_to_ir(&body)?;
-    apply_anthropic_defaults(&mut ir_request, &state)?;
-    match select_anthropic_messages_backend(&ir_request, &state)? {
-        AnthropicMessagesBackend::Chat => {
+    let route = state
+        .router
+        .route(FrontendEndpoint::AnthropicMessages, &ir_request.model)?;
+    ir_request.model = route.backend_model().to_owned();
+    apply_anthropic_defaults(&mut ir_request, &state, route.backend())?;
+
+    match route.backend_kind() {
+        config::BackendKind::Chat => {
+            let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
-            let upstream_response = send_chat_request(&state, &headers, chat_body).await?;
+            let upstream_response =
+                send_chat_request(&state, &headers, route.backend(), chat_body).await?;
 
             if ir_request.stream {
                 chat_stream_to_anthropic_response(upstream_response).await
@@ -253,9 +203,10 @@ async fn anthropic_messages(
                 chat_json_to_anthropic_response(upstream_response).await
             }
         }
-        AnthropicMessagesBackend::Responses => {
+        config::BackendKind::Responses => {
             let responses_body = ir_request_to_responses(&ir_request)?;
-            let upstream_response = send_responses_request(&state, responses_body).await?;
+            let upstream_response =
+                send_responses_request(&state, route.backend(), responses_body).await?;
 
             if ir_request.stream {
                 responses_stream_to_anthropic_response(upstream_response).await
@@ -263,6 +214,9 @@ async fn anthropic_messages(
                 responses_json_to_anthropic_response(upstream_response).await
             }
         }
+        config::BackendKind::Anthropic => Err(error::ProxyError::Config(
+            "Anthropic Messages frontend cannot route directly to an Anthropic backend".to_owned(),
+        )),
     }
 }
 
@@ -272,12 +226,18 @@ async fn openai_responses(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> error::Result<Response> {
-    let profile = DeepSeek;
     let mut ir_request = responses_request_to_ir(&body)?;
-    match select_openai_responses_backend(&ir_request, &state)? {
-        OpenAiResponsesBackend::Chat => {
+    let route = state
+        .router
+        .route(FrontendEndpoint::OpenAiResponses, &ir_request.model)?;
+    ir_request.model = route.backend_model().to_owned();
+
+    match route.backend_kind() {
+        config::BackendKind::Chat => {
+            let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
-            let upstream_response = send_chat_request(&state, &headers, chat_body).await?;
+            let upstream_response =
+                send_chat_request(&state, &headers, route.backend(), chat_body).await?;
 
             if ir_request.stream {
                 chat_stream_to_responses_response(upstream_response).await
@@ -285,10 +245,11 @@ async fn openai_responses(
                 chat_json_to_responses_response(upstream_response).await
             }
         }
-        OpenAiResponsesBackend::Anthropic => {
-            apply_responses_anthropic_backend_defaults(&mut ir_request, &state)?;
+        config::BackendKind::Anthropic => {
+            apply_anthropic_defaults(&mut ir_request, &state, route.backend())?;
             let anthropic_body = ir_request_to_anthropic(&ir_request)?;
-            let upstream_response = send_anthropic_request(&state, anthropic_body).await?;
+            let upstream_response =
+                send_anthropic_request(&state, route.backend(), anthropic_body).await?;
 
             if ir_request.stream {
                 anthropic_stream_to_responses_response(upstream_response).await
@@ -296,16 +257,20 @@ async fn openai_responses(
                 anthropic_json_to_responses_response(upstream_response).await
             }
         }
+        config::BackendKind::Responses => Err(error::ProxyError::Config(
+            "OpenAI Responses frontend cannot route directly to a Responses backend".to_owned(),
+        )),
     }
 }
 
 async fn send_chat_request(
     state: &AppState,
     headers: &HeaderMap,
+    backend: &config::BackendConfig,
     body: Value,
 ) -> error::Result<reqwest::Response> {
-    let upstream_url = parse_chat_completions_url(&state.chat_completions_url)?;
-    let bearer_token = upstream_bearer_token(state, headers)?;
+    let upstream_url = parse_chat_completions_url(backend)?;
+    let bearer_token = upstream_bearer_token(backend, headers)?;
     let upstream_response = state
         .http_client
         .post(upstream_url)
@@ -317,13 +282,21 @@ async fn send_chat_request(
     ensure_upstream_success(upstream_response).await
 }
 
-async fn send_responses_request(state: &AppState, body: Value) -> error::Result<reqwest::Response> {
-    responses_backend_client(state)?.send(body).await
+async fn send_responses_request(
+    state: &AppState,
+    backend: &config::BackendConfig,
+    body: Value,
+) -> error::Result<reqwest::Response> {
+    responses_backend_client(state, backend)?.send(body).await
 }
 
 /// Sends an already-encoded Anthropic Messages request to the configured rich backend.
-async fn send_anthropic_request(state: &AppState, body: Value) -> error::Result<reqwest::Response> {
-    anthropic_backend_client(state)?.send(body).await
+async fn send_anthropic_request(
+    state: &AppState,
+    backend: &config::BackendConfig,
+    body: Value,
+) -> error::Result<reqwest::Response> {
+    anthropic_backend_client(state, backend)?.send(body).await
 }
 
 async fn chat_json_to_anthropic_response(
@@ -447,159 +420,75 @@ async fn ensure_upstream_success(
 fn apply_anthropic_defaults(
     request: &mut ir::request::IrRequest,
     state: &AppState,
+    backend: &config::BackendConfig,
 ) -> error::Result<()> {
     if request.max_tokens.is_none() {
-        request.max_tokens = Some(default_anthropic_max_tokens(state)?);
+        request.max_tokens = Some(default_anthropic_max_tokens(state, backend));
     }
     Ok(())
 }
 
-fn default_anthropic_max_tokens(state: &AppState) -> error::Result<u32> {
-    Ok(state
+fn default_anthropic_max_tokens(state: &AppState, backend: &config::BackendConfig) -> u32 {
+    state
         .anthropic_default_max_tokens
-        .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS))
+        .or(backend.default_max_tokens)
+        .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
 }
 
-fn select_anthropic_messages_backend(
-    request: &ir::request::IrRequest,
+fn responses_backend_client(
     state: &AppState,
-) -> error::Result<AnthropicMessagesBackend> {
-    match state.anthropic_messages_backend.as_deref() {
-        Some(configured) => parse_anthropic_messages_backend(configured, request, state),
-        None => Ok(auto_anthropic_messages_backend(request, state)),
-    }
-}
-
-fn parse_anthropic_messages_backend(
-    configured: &str,
-    request: &ir::request::IrRequest,
-    state: &AppState,
-) -> error::Result<AnthropicMessagesBackend> {
-    match configured.trim().to_ascii_lowercase().as_str() {
-        "auto" => Ok(auto_anthropic_messages_backend(request, state)),
-        "chat" | "deepseek" | "deepseek-chat" => Ok(AnthropicMessagesBackend::Chat),
-        "responses" | "openai" | "openai-responses" => Ok(AnthropicMessagesBackend::Responses),
-        _ => Err(error::ProxyError::Config(format!(
-            "{ANTHROPIC_MESSAGES_BACKEND_ENV} must be `auto`, `chat`, or `responses`, got `{configured}`"
-        ))),
-    }
-}
-
-fn auto_anthropic_messages_backend(
-    request: &ir::request::IrRequest,
-    state: &AppState,
-) -> AnthropicMessagesBackend {
-    if is_deepseek_model(&request.model) {
-        return AnthropicMessagesBackend::Chat;
-    }
-
-    if state.responses_endpoint.is_some() || state.responses_api_key.is_some() {
-        AnthropicMessagesBackend::Responses
-    } else {
-        AnthropicMessagesBackend::Chat
-    }
-}
-
-fn is_deepseek_model(model: &str) -> bool {
-    model.starts_with("deepseek-")
-}
-
-/// Selects the backend that should serve a client-facing OpenAI Responses request.
-fn select_openai_responses_backend(
-    request: &ir::request::IrRequest,
-    state: &AppState,
-) -> error::Result<OpenAiResponsesBackend> {
-    match state.responses_backend.as_deref() {
-        Some(configured) => parse_openai_responses_backend(configured, request, state),
-        None => Ok(auto_openai_responses_backend(request, state)),
-    }
-}
-
-/// Parses the temporary pre-M7 backend override for `/v1/responses`.
-fn parse_openai_responses_backend(
-    configured: &str,
-    request: &ir::request::IrRequest,
-    state: &AppState,
-) -> error::Result<OpenAiResponsesBackend> {
-    match configured.trim().to_ascii_lowercase().as_str() {
-        "auto" => Ok(auto_openai_responses_backend(request, state)),
-        "chat" | "deepseek" | "deepseek-chat" => Ok(OpenAiResponsesBackend::Chat),
-        "anthropic" | "claude" | "anthropic-messages" => Ok(OpenAiResponsesBackend::Anthropic),
-        _ => Err(error::ProxyError::Config(format!(
-            "{RESPONSES_BACKEND_ENV} must be `auto`, `chat`, or `anthropic`, got `{configured}`"
-        ))),
-    }
-}
-
-/// Uses DeepSeek for its native models and Anthropic when rich backend credentials are present.
-fn auto_openai_responses_backend(
-    request: &ir::request::IrRequest,
-    state: &AppState,
-) -> OpenAiResponsesBackend {
-    if is_deepseek_model(&request.model) {
-        return OpenAiResponsesBackend::Chat;
-    }
-
-    if state.anthropic_base_url.is_some()
-        || state.anthropic_auth_token.is_some()
-        || state.anthropic_default_model.is_some()
-    {
-        OpenAiResponsesBackend::Anthropic
-    } else {
-        OpenAiResponsesBackend::Chat
-    }
-}
-
-/// Applies Anthropic-specific defaults before encoding a Responses request for that backend.
-fn apply_responses_anthropic_backend_defaults(
-    request: &mut ir::request::IrRequest,
-    state: &AppState,
-) -> error::Result<()> {
-    if let Some(model) = state.anthropic_default_model.as_deref() {
-        request.model = model.trim().to_owned();
-    }
-    if request.max_tokens.is_none() {
-        request.max_tokens = Some(default_anthropic_max_tokens(state)?);
-    }
-    Ok(())
-}
-
-fn responses_backend_client(state: &AppState) -> error::Result<ResponsesBackendClient> {
-    let endpoint = state
-        .responses_endpoint
-        .as_deref()
-        .ok_or_else(|| error::ProxyError::Config(format!("missing {OPENAI_API_ENDPOINT_ENV}")))?;
-    let api_key = state
-        .responses_api_key
-        .as_deref()
-        .ok_or_else(|| error::ProxyError::Config(format!("missing {OPENAI_API_KEY_ENV}")))?;
+    backend: &config::BackendConfig,
+) -> error::Result<ResponsesBackendClient> {
+    let endpoint = backend.responses_endpoint().ok_or_else(|| {
+        error::ProxyError::Config(format!(
+            "responses backend `{}` requires `base_url` or `endpoint`",
+            backend.name
+        ))
+    })?;
+    let api_key = backend.api_key.as_deref().ok_or_else(|| {
+        error::ProxyError::Config(format!(
+            "responses backend `{}` requires `api_key`",
+            backend.name
+        ))
+    })?;
 
     ResponsesBackendClient::with_http_client(state.http_client.clone(), endpoint, api_key)
 }
 
 /// Builds the configured Anthropic Messages backend client used by chain 2.
-fn anthropic_backend_client(state: &AppState) -> error::Result<AnthropicBackendClient> {
-    let base_url = state
-        .anthropic_base_url
+fn anthropic_backend_client(
+    state: &AppState,
+    backend: &config::BackendConfig,
+) -> error::Result<AnthropicBackendClient> {
+    let api_key = backend.api_key.as_deref().ok_or_else(|| {
+        error::ProxyError::Config(format!(
+            "anthropic backend `{}` requires `api_key`",
+            backend.name
+        ))
+    })?;
+    let endpoint = anthropic_messages_endpoint(backend)?;
+    let anthropic_version = backend
+        .anthropic_version
         .as_deref()
-        .ok_or_else(|| error::ProxyError::Config(format!("missing {ANTHROPIC_BASE_URL_ENV}")))?;
-    let api_key = state
-        .anthropic_auth_token
-        .as_deref()
-        .ok_or_else(|| error::ProxyError::Config(format!("missing {ANTHROPIC_AUTH_TOKEN_ENV}")))?;
-    let endpoint = anthropic_messages_endpoint(base_url)?;
+        .unwrap_or(config::DEFAULT_ANTHROPIC_VERSION);
 
     Ok(AnthropicBackendClient::with_http_client(
         state.http_client.clone(),
         endpoint,
         api_key,
-        &state.anthropic_version,
+        anthropic_version,
     )?
     .with_cache_control_injection(state.anthropic_cache_control))
 }
 
 /// Converts an Anthropic base URL into the concrete Messages API endpoint.
-fn anthropic_messages_endpoint(base_url: &str) -> error::Result<String> {
+fn anthropic_messages_endpoint(backend: &config::BackendConfig) -> error::Result<String> {
+    let base_url = backend.anthropic_endpoint_base().ok_or_else(|| {
+        error::ProxyError::Config(format!(
+            "anthropic backend `{}` requires `base_url` or `endpoint`",
+            backend.name
+        ))
+    })?;
     let trimmed = base_url.trim().trim_end_matches('/');
     let endpoint = if trimmed.ends_with("/v1/messages") {
         trimmed.to_owned()
@@ -608,17 +497,18 @@ fn anthropic_messages_endpoint(base_url: &str) -> error::Result<String> {
     };
     reqwest::Url::parse(&endpoint).map_err(|err| {
         error::ProxyError::Config(format!(
-            "invalid {ANTHROPIC_BASE_URL_ENV} `{base_url}`: {err}"
+            "invalid anthropic backend `{}` URL `{base_url}`: {err}",
+            backend.name
         ))
     })?;
     Ok(endpoint)
 }
 
 fn upstream_bearer_token<'a>(
-    state: &'a AppState,
+    backend: &'a config::BackendConfig,
     headers: &'a HeaderMap,
 ) -> error::Result<&'a str> {
-    if let Some(api_key) = state.chat_api_key.as_deref() {
+    if let Some(api_key) = backend.api_key.as_deref() {
         return Ok(api_key);
     }
 
@@ -628,8 +518,12 @@ fn upstream_bearer_token<'a>(
         }),
         None => match headers.get(header::AUTHORIZATION) {
             Some(authorization) => bearer_token_from_authorization(authorization),
-            None => Err(error::ProxyError::Config(format!(
+            None if backend.name == "deepseek" => Err(error::ProxyError::Config(format!(
                 "missing {DEEPSEEK_API_KEY_ENV}"
+            ))),
+            None => Err(error::ProxyError::Config(format!(
+                "chat backend `{}` requires `api_key` or a client x-api-key/Authorization header",
+                backend.name
             ))),
         },
     }
@@ -653,17 +547,19 @@ fn bearer_token_from_authorization(value: &HeaderValue) -> error::Result<&str> {
     Ok(token)
 }
 
-fn parse_chat_completions_url(url: &str) -> error::Result<reqwest::Url> {
-    reqwest::Url::parse(url).map_err(|err| {
-        error::ProxyError::Config(format!("invalid {CHAT_COMPLETIONS_URL_ENV} `{url}`: {err}"))
+fn parse_chat_completions_url(backend: &config::BackendConfig) -> error::Result<reqwest::Url> {
+    let url = backend.chat_completions_url().ok_or_else(|| {
+        error::ProxyError::Config(format!(
+            "chat backend `{}` requires `base_url` or `endpoint`",
+            backend.name
+        ))
+    })?;
+    reqwest::Url::parse(&url).map_err(|err| {
+        error::ProxyError::Config(format!(
+            "invalid chat backend `{}` URL `{url}`: {err}",
+            backend.name
+        ))
     })
-}
-
-fn default_chat_completions_url(profile: &dyn CapabilityProfile) -> String {
-    format!(
-        "{}/chat/completions",
-        profile.base_url().trim_end_matches('/')
-    )
 }
 
 /// Copies request content type to the upstream request when the client supplied one.
@@ -702,22 +598,10 @@ mod tests {
     };
 
     fn test_app(passthrough_upstream_url: Option<String>) -> Router {
-        app_with_state(AppState {
-            http_client: reqwest::Client::new(),
+        app_with_state(AppState::from_config(config::Config {
             passthrough_upstream_url,
-            chat_completions_url: "http://127.0.0.1:9/chat/completions".to_owned(),
-            chat_api_key: Some("test-backend-key".to_owned()),
-            responses_endpoint: None,
-            responses_api_key: None,
-            anthropic_messages_backend: None,
-            responses_backend: None,
-            anthropic_base_url: None,
-            anthropic_auth_token: None,
-            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
-            anthropic_default_model: None,
-            anthropic_default_max_tokens: None,
-            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
-        })
+            ..config::Config::default()
+        }))
     }
 
     fn test_app_with_chat_backend(
@@ -725,22 +609,18 @@ mod tests {
         chat_api_key: Option<&str>,
         anthropic_default_max_tokens: Option<u32>,
     ) -> Router {
-        app_with_state(AppState {
-            http_client: reqwest::Client::new(),
-            passthrough_upstream_url: None,
-            chat_completions_url,
-            chat_api_key: chat_api_key.map(ToOwned::to_owned),
-            responses_endpoint: None,
-            responses_api_key: None,
-            anthropic_messages_backend: None,
-            responses_backend: None,
-            anthropic_base_url: None,
-            anthropic_auth_token: None,
-            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
-            anthropic_default_model: None,
+        app_with_state(AppState::from_config(config::Config {
             anthropic_default_max_tokens,
-            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
-        })
+            backends: vec![config::BackendConfig {
+                name: "deepseek".to_owned(),
+                kind: Some(config::BackendKind::Chat),
+                endpoint: Some(chat_completions_url),
+                api_key: chat_api_key.map(ToOwned::to_owned),
+                profile: Some(config::ProfileKind::DeepSeek),
+                ..config::BackendConfig::default()
+            }],
+            ..config::Config::default()
+        }))
     }
 
     fn test_app_with_responses_backend(
@@ -748,22 +628,21 @@ mod tests {
         responses_api_key: Option<&str>,
         anthropic_messages_backend: Option<&str>,
     ) -> Router {
-        app_with_state(AppState {
-            http_client: reqwest::Client::new(),
-            passthrough_upstream_url: None,
-            chat_completions_url: "http://127.0.0.1:9/chat/completions".to_owned(),
-            chat_api_key: Some("test-backend-key".to_owned()),
-            responses_endpoint: Some(responses_endpoint),
-            responses_api_key: responses_api_key.map(ToOwned::to_owned),
-            anthropic_messages_backend: anthropic_messages_backend.map(ToOwned::to_owned),
-            responses_backend: None,
-            anthropic_base_url: None,
-            anthropic_auth_token: None,
-            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
-            anthropic_default_model: None,
-            anthropic_default_max_tokens: None,
-            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
-        })
+        app_with_state(AppState::from_config(config::Config {
+            backends: vec![config::BackendConfig {
+                name: "responses".to_owned(),
+                kind: Some(config::BackendKind::Responses),
+                endpoint: Some(responses_endpoint),
+                api_key: responses_api_key.map(ToOwned::to_owned),
+                profile: Some(config::ProfileKind::GenericOpenAi),
+                ..config::BackendConfig::default()
+            }],
+            routing: config::RoutingConfig {
+                anthropic_messages_backend: anthropic_messages_backend.map(ToOwned::to_owned),
+                ..config::RoutingConfig::default()
+            },
+            ..config::Config::default()
+        }))
     }
 
     fn test_app_with_anthropic_backend(
@@ -772,22 +651,23 @@ mod tests {
         responses_backend: Option<&str>,
         anthropic_default_model: Option<&str>,
     ) -> Router {
-        app_with_state(AppState {
-            http_client: reqwest::Client::new(),
-            passthrough_upstream_url: None,
-            chat_completions_url: "http://127.0.0.1:9/chat/completions".to_owned(),
-            chat_api_key: Some("test-backend-key".to_owned()),
-            responses_endpoint: None,
-            responses_api_key: None,
-            anthropic_messages_backend: None,
-            responses_backend: responses_backend.map(ToOwned::to_owned),
-            anthropic_base_url: Some(anthropic_base_url),
-            anthropic_auth_token: anthropic_auth_token.map(ToOwned::to_owned),
-            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
-            anthropic_default_model: anthropic_default_model.map(ToOwned::to_owned),
-            anthropic_default_max_tokens: None,
-            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
-        })
+        app_with_state(AppState::from_config(config::Config {
+            backends: vec![config::BackendConfig {
+                name: "anthropic".to_owned(),
+                kind: Some(config::BackendKind::Anthropic),
+                base_url: Some(anthropic_base_url),
+                api_key: anthropic_auth_token.map(ToOwned::to_owned),
+                profile: Some(config::ProfileKind::Anthropic),
+                anthropic_version: Some(DEFAULT_ANTHROPIC_VERSION.to_owned()),
+                default_model: anthropic_default_model.map(ToOwned::to_owned),
+                ..config::BackendConfig::default()
+            }],
+            routing: config::RoutingConfig {
+                responses_backend: responses_backend.map(ToOwned::to_owned),
+                ..config::RoutingConfig::default()
+            },
+            ..config::Config::default()
+        }))
     }
 
     /// Posts a Claude Code-style Anthropic Messages request to the in-process router.
@@ -2672,21 +2552,12 @@ mod tests {
 
     #[test]
     fn authorization_bearer_header_can_supply_upstream_token() {
-        let state = AppState {
-            http_client: reqwest::Client::new(),
-            passthrough_upstream_url: None,
-            chat_completions_url: "http://127.0.0.1:9/chat/completions".to_owned(),
-            chat_api_key: None,
-            responses_endpoint: None,
-            responses_api_key: None,
-            anthropic_messages_backend: None,
-            responses_backend: None,
-            anthropic_base_url: None,
-            anthropic_auth_token: None,
-            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
-            anthropic_default_model: None,
-            anthropic_default_max_tokens: None,
-            anthropic_cache_control: AnthropicCacheControlInjection::EphemeralBreakpoints,
+        let backend = config::BackendConfig {
+            name: "deepseek".to_owned(),
+            kind: Some(config::BackendKind::Chat),
+            endpoint: Some("http://127.0.0.1:9/chat/completions".to_owned()),
+            profile: Some(config::ProfileKind::DeepSeek),
+            ..config::BackendConfig::default()
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -2695,7 +2566,7 @@ mod tests {
         );
 
         assert_eq!(
-            upstream_bearer_token(&state, &headers).unwrap(),
+            upstream_bearer_token(&backend, &headers).unwrap(),
             "client-token"
         );
     }

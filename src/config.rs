@@ -390,7 +390,7 @@ impl Default for SwitchConfig {
     }
 }
 
-/// Temporary route-level overrides kept until M7-02 model routing owns selection.
+/// Legacy route-level overrides used when no exact model alias matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RoutingConfig {

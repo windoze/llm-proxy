@@ -12,24 +12,25 @@ I will follow the repository task order without doing broad issue triage first. 
 
 ## Current Task
 
-Selected task: `M7-01` — implement the configuration system in `config.rs`.
+Selected task: `M7-02` — implement model routing in `provider/router.rs`.
 
 Planned execution:
 
-1. Use `TODO.md` as the source of truth and treat `M7-01` as the first incomplete task.
-2. Treat the latest `[M6-RV] Review Anthropic chain` commit as completed review context; only carry forward the directly relevant note that formal model/config handling is scheduled in M7-01/M7-02.
-3. Inspect current `config.rs`, route startup, provider client construction, existing environment variables, and tests to understand all configuration surfaces already in use.
-4. Implement strongly typed config loading with file support plus environment overrides for listen address, backend definitions, model aliases, and feature switches, preserving existing environment behavior where it is the current public interface.
-5. Add startup validation and focused tests for file loading, env override precedence, required backend fields, model alias parsing, and feature switch defaults.
+1. Use `TODO.md` as the source of truth and treat `M7-02` as the first incomplete task.
+2. Treat the latest `[M7-01] Implement configuration system` commit as completed context; only carry forward directly relevant model/config routing expectations.
+3. Inspect current `config.rs`, route startup, provider client construction, profile selection, and endpoint-specific routing code to understand all model routing surfaces already in use.
+4. Implement a centralized router in `provider/router.rs` that selects the configured backend/profile by requested model and endpoint type, rewrites the backend model name, and returns clear errors for missing matches.
+5. Add focused tests for alias routing, endpoint restrictions, backend/profile lookup, legacy/default behavior, and no-match diagnostics.
 6. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, then `cargo test --all --all-targets`.
-7. Update `TODO.md` with `[DONE] M7-01` and completion evidence, update this file at key milestones, commit, and stop.
+7. Update `TODO.md` with `[DONE] M7-02` and completion evidence, update this file at key milestones, commit, and stop.
 
 Progress:
 
-- Identified `M7-01` as the first incomplete task.
-- Confirmed the latest commit is `[M6-RV] Review Anthropic chain`; no unfinished issue in that commit preempts `M7-01`.
-- Baseline validation passed before code changes: formatting check, clippy with denied warnings, and the full test suite were green.
-- Implemented the typed configuration system with TOML/YAML loading, legacy and structured environment overrides, startup validation, model alias parsing, backend definitions, and cache/reasoning switches.
-- Wired startup and route state construction through `Config`, preserving the existing env-only behavior, keeping the global Anthropic default max-token override, and making Anthropic cache-control injection configurable.
-- Added focused config tests and completed validation after changes: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` all passed.
-- Updated `TODO.md` to mark `M7-01` `[DONE]` with completion evidence.
+- Identified `M7-02` as the first incomplete task.
+- Confirmed the latest commit is `[M7-01] Implement configuration system`; no unfinished issue in that commit preempts `M7-02`.
+- Baseline validation before code changes passed: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+- Implemented `provider::router::ModelRouter` with endpoint-aware backend/profile selection, exact model alias rewriting, legacy override handling, clear incompatibility/missing-backend errors, and default DeepSeek chat fallback for envless compatibility.
+- Wired `/v1/messages` and `/v1/responses` through the router so each handler rewrites `IrRequest.model` before upstream encoding and builds Chat/Responses/Anthropic clients from the selected backend config.
+- Updated route tests to construct `Config` objects and added focused router tests for alias routing, endpoint restrictions, implicit rich-backend selection, legacy override diagnostics, and default DeepSeek behavior.
+- Completed validation after changes: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` all passed.
+- Updated `TODO.md` to mark `M7-02` `[DONE]` with completion evidence.

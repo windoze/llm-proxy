@@ -718,9 +718,16 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 新增配置单元测试覆盖 TOML/YAML 解析、文件扩展名识别、env 覆盖优先级、legacy 后端创建、backend JSON 覆盖、模型别名校验、重复后端与缺失 profile 拒绝。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M7-02 `[TODO]` 模型路由 (`provider/router.rs`)
+### [DONE] M7-02 模型路由 (`provider/router.rs`)
 根据请求的 model 名 + 端点类型，用配置选择后端与 profile，并改写发往后端的 model 名。
 无匹配时返回清晰错误。
+
+完成记录：
+- 2026-07-06：已新增 `src/provider/router.rs`，实现 `ModelRouter`，按前端端点（Anthropic Messages / OpenAI Responses）与请求 model 选择允许的后端协议、profile 与上游 model 名；精确 `model_aliases` 优先，legacy route override 仅在无精确别名时生效。
+- 已将 `/v1/messages` 与 `/v1/responses` 路由改为通过 `ModelRouter` 统一解析后端，编码上游请求前改写 `IrRequest.model`，并从选中的 backend 读取 Chat/Responses/Anthropic URL、凭据、Anthropic version、默认 model 与 max token 设置。
+- 已保留 env-only 旧行为：无显式 chat backend 时仍注入默认 DeepSeek Chat backend，可继续使用客户端 `x-api-key`/`Authorization` 作为上游 token；非 DeepSeek 模型在配置了 rich backend 时继续按端点优先路由到 Responses 或 Anthropic。
+- 新增路由单元测试覆盖精确别名改名、端点不兼容后端拒绝、Responses/Anthropic 隐式 rich backend 选择、legacy override 缺失后端错误，以及默认 DeepSeek 兼容路径；现有 route-level 集成测试已改为从 `Config` 构造状态。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M7-03 `[TODO]` 错误映射完善 (`error.rs`)
 各协议错误 JSON 结构、错误类型分类、状态码、`Retry-After`/限流头翻译（DESIGN §6.6）。

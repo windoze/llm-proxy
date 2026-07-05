@@ -11,6 +11,7 @@ pub mod anthropic_backend;
 pub mod anthropic_cache;
 pub mod deepseek;
 pub mod responses_backend;
+pub mod router;
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const EMPTY_PARAM_BLOCKLIST: &[&str] = &[];
