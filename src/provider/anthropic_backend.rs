@@ -143,8 +143,9 @@ async fn ensure_upstream_success(response: reqwest::Response) -> Result<reqwest:
         return Ok(response);
     }
 
+    let headers = response.headers().clone();
     let body = response.text().await?;
-    Err(ProxyError::Upstream4xx { status, body })
+    Err(ProxyError::upstream_status(status, &headers, body))
 }
 
 #[cfg(test)]
@@ -416,7 +417,11 @@ mod tests {
             .unwrap_err();
 
         match err {
-            ProxyError::Upstream4xx { status, body } => {
+            ProxyError::UpstreamStatus {
+                status,
+                body,
+                headers: _,
+            } => {
                 assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
                 assert_eq!(body, "invalid request");
             }

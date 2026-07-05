@@ -4,7 +4,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Request, State},
+    extract::{Request, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -181,21 +181,34 @@ async fn passthrough(
 async fn anthropic_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: std::result::Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let result = match body {
+        Ok(Json(body)) => anthropic_messages_inner(&state, headers, body).await,
+        Err(rejection) => Err(json_rejection_error(rejection)),
+    };
+
+    result.unwrap_or_else(error::ProxyError::into_anthropic_response)
+}
+
+async fn anthropic_messages_inner(
+    state: &AppState,
+    headers: HeaderMap,
+    body: Value,
 ) -> error::Result<Response> {
     let mut ir_request = anthropic_request_to_ir(&body)?;
     let route = state
         .router
         .route(FrontendEndpoint::AnthropicMessages, &ir_request.model)?;
     ir_request.model = route.backend_model().to_owned();
-    apply_anthropic_defaults(&mut ir_request, &state, route.backend())?;
+    apply_anthropic_defaults(&mut ir_request, state, route.backend())?;
 
     match route.backend_kind() {
         config::BackendKind::Chat => {
             let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
             let upstream_response =
-                send_chat_request(&state, &headers, route.backend(), chat_body).await?;
+                send_chat_request(state, &headers, route.backend(), chat_body).await?;
 
             if ir_request.stream {
                 chat_stream_to_anthropic_response(upstream_response).await
@@ -206,7 +219,7 @@ async fn anthropic_messages(
         config::BackendKind::Responses => {
             let responses_body = ir_request_to_responses(&ir_request)?;
             let upstream_response =
-                send_responses_request(&state, route.backend(), responses_body).await?;
+                send_responses_request(state, route.backend(), responses_body).await?;
 
             if ir_request.stream {
                 responses_stream_to_anthropic_response(upstream_response).await
@@ -224,7 +237,20 @@ async fn anthropic_messages(
 async fn openai_responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: std::result::Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let result = match body {
+        Ok(Json(body)) => openai_responses_inner(&state, headers, body).await,
+        Err(rejection) => Err(json_rejection_error(rejection)),
+    };
+
+    result.unwrap_or_else(error::ProxyError::into_responses_response)
+}
+
+async fn openai_responses_inner(
+    state: &AppState,
+    headers: HeaderMap,
+    body: Value,
 ) -> error::Result<Response> {
     let mut ir_request = responses_request_to_ir(&body)?;
     let route = state
@@ -237,7 +263,7 @@ async fn openai_responses(
             let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
             let upstream_response =
-                send_chat_request(&state, &headers, route.backend(), chat_body).await?;
+                send_chat_request(state, &headers, route.backend(), chat_body).await?;
 
             if ir_request.stream {
                 chat_stream_to_responses_response(upstream_response).await
@@ -246,10 +272,10 @@ async fn openai_responses(
             }
         }
         config::BackendKind::Anthropic => {
-            apply_anthropic_defaults(&mut ir_request, &state, route.backend())?;
+            apply_anthropic_defaults(&mut ir_request, state, route.backend())?;
             let anthropic_body = ir_request_to_anthropic(&ir_request)?;
             let upstream_response =
-                send_anthropic_request(&state, route.backend(), anthropic_body).await?;
+                send_anthropic_request(state, route.backend(), anthropic_body).await?;
 
             if ir_request.stream {
                 anthropic_stream_to_responses_response(upstream_response).await
@@ -257,10 +283,15 @@ async fn openai_responses(
                 anthropic_json_to_responses_response(upstream_response).await
             }
         }
+
         config::BackendKind::Responses => Err(error::ProxyError::Config(
             "OpenAI Responses frontend cannot route directly to a Responses backend".to_owned(),
         )),
     }
+}
+
+fn json_rejection_error(rejection: JsonRejection) -> error::ProxyError {
+    error::ProxyError::ProtocolMapping(format!("invalid JSON request body: {rejection}"))
 }
 
 async fn send_chat_request(
@@ -413,8 +444,9 @@ async fn ensure_upstream_success(
         return Ok(upstream_response);
     }
 
+    let headers = upstream_response.headers().clone();
     let body = upstream_response.text().await?;
-    Err(error::ProxyError::Upstream4xx { status, body })
+    Err(error::ProxyError::upstream_status(status, &headers, body))
 }
 
 fn apply_anthropic_defaults(
@@ -587,7 +619,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{
             Request, StatusCode,
-            header::{AUTHORIZATION, CONTENT_TYPE},
+            header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
         },
     };
     use serde_json::json;
@@ -2967,9 +2999,123 @@ mod tests {
         assert_eq!(
             value,
             json!({
+                "type": "error",
                 "error": {
-                    "code": "config",
+                    "type": "api_error",
                     "message": "configuration error: missing DEEPSEEK_API_KEY"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_route_maps_upstream_error_to_anthropic_format() {
+        let upstream = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "17")
+                    .insert_header("x-ratelimit-remaining-requests", "0")
+                    .set_body_json(json!({
+                        "error": {
+                            "message": "chat backend rate limit"
+                        }
+                    })),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let response = post_messages(
+            test_app_with_chat_backend(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+            ),
+            json!({
+                "model": "deepseek-chat",
+                "messages": [{ "role": "user", "content": "hello" }]
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "17");
+        assert_eq!(
+            response
+                .headers()
+                .get("anthropic-ratelimit-requests-remaining")
+                .unwrap(),
+            "0"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": "upstream returned status 429 Too Many Requests: chat backend rate limit"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_route_maps_upstream_error_to_responses_format() {
+        let upstream = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("anthropic-ratelimit-tokens-reset", "2026-07-06T00:00:00Z")
+                    .set_body_json(json!({
+                        "error": {
+                            "message": "anthropic backend overloaded"
+                        }
+                    })),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let response = post_responses(
+            test_app_with_anthropic_backend(
+                upstream.uri(),
+                Some("anthropic-secret"),
+                None,
+                Some("claude-sonnet-4-5"),
+            ),
+            json!({
+                "model": "claude-sonnet-4-5",
+                "input": "hello"
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("x-ratelimit-reset-tokens").unwrap(),
+            "2026-07-06T00:00:00Z"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "error": {
+                    "message": "upstream returned status 503 Service Unavailable: anthropic backend overloaded",
+                    "type": "server_error",
+                    "param": null,
+                    "code": "upstream_5xx"
                 }
             })
         );

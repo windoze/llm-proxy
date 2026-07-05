@@ -121,8 +121,9 @@ async fn ensure_upstream_success(response: reqwest::Response) -> Result<reqwest:
         return Ok(response);
     }
 
+    let headers = response.headers().clone();
     let body = response.text().await?;
-    Err(ProxyError::Upstream4xx { status, body })
+    Err(ProxyError::upstream_status(status, &headers, body))
 }
 
 fn mapping_error(message: impl Into<String>) -> ProxyError {
@@ -269,7 +270,11 @@ mod tests {
             .unwrap_err();
 
         match err {
-            ProxyError::Upstream4xx { status, body } => {
+            ProxyError::UpstreamStatus {
+                status,
+                body,
+                headers: _,
+            } => {
                 assert_eq!(status, reqwest::StatusCode::TOO_MANY_REQUESTS);
                 assert_eq!(body, "rate limited");
             }

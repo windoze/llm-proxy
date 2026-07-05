@@ -729,9 +729,17 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 新增路由单元测试覆盖精确别名改名、端点不兼容后端拒绝、Responses/Anthropic 隐式 rich backend 选择、legacy override 缺失后端错误，以及默认 DeepSeek 兼容路径；现有 route-level 集成测试已改为从 `Config` 构造状态。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M7-03 `[TODO]` 错误映射完善 (`error.rs`)
+### [DONE] M7-03 错误映射完善 (`error.rs`)
 各协议错误 JSON 结构、错误类型分类、状态码、`Retry-After`/限流头翻译（DESIGN §6.6）。
 后端 4xx/5xx 映射为对应前端协议的错误格式（Anthropic error / Responses error 结构不同）。
+
+完成记录：
+- 2026-07-06：已在 `src/error.rs` 增加协议感知错误格式化，保留 generic 旧格式，同时为 Anthropic Messages 返回 `{"type":"error","error":{...}}`，为 OpenAI Responses 返回 OpenAI-style `{"error":{"message","type","param","code"}}`。
+- 已将错误分类统一映射到 invalid request、auth、permission、not found、rate limit、server 等类型，并让 `/v1/messages` 与 `/v1/responses` 在本地解析/配置/协议错误和 JSON extractor 失败时返回对应前端协议的错误结构。
+- 已把上游非成功响应从仅命名为 4xx 的错误扩展为覆盖 4xx/5xx 的 `UpstreamStatus`，保留上游状态码和响应体，并抽取上游 JSON error message 生成前端可读错误。
+- 已保存并翻译 `Retry-After` 与 OpenAI/Anthropic rate-limit headers：OpenAI-style `x-ratelimit-*` 可翻译为 Anthropic-style `anthropic-ratelimit-*`，Anthropic-style headers 也可翻译到 Responses 前端。
+- 新增单元测试和路由测试覆盖 Anthropic/Responses 错误 JSON、上游 429/503 状态映射、`Retry-After` 与限流头翻译。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M7-04 `[TODO]` 不支持特性表 (`protocol/capability.rs`)
 集中管理每个 `IR→协议` 方向的特性支持决策：drop / emulate / 400（DESIGN §6.5）。
