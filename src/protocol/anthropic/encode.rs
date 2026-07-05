@@ -3,16 +3,347 @@
 // Later M2 tasks wire this staged encoder into HTTP routing and streaming.
 #![allow(dead_code)]
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Number, Value, json};
 
 use crate::{
     error::{ProxyError, Result},
     ir::{
-        message::{ContentBlock, ImageSource, Provider, Thinking},
-        request::{IrResponse, StopReason, Usage},
+        message::{ContentBlock, ImageSource, Message, Provider, Role, Thinking},
+        request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
+    protocol::tool_ids::validate_tool_result_pairs,
     reasoning::envelope::{SourceBlock, wrap_as_signature},
 };
+
+const ANTHROPIC_REQUEST_CORE_FIELDS: &[&str] = &[
+    "model",
+    "system",
+    "messages",
+    "tools",
+    "tool_choice",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stop_sequences",
+    "stream",
+];
+const ANTHROPIC_REQUEST_EXTRA_FIELDS: &[&str] = &[
+    "metadata",
+    "service_tier",
+    "thinking",
+    "context_management",
+    "container",
+    "mcp_servers",
+];
+
+/// Converts a provider-neutral request into an Anthropic Messages request body.
+pub fn ir_request_to_anthropic(request: &IrRequest) -> Result<Value> {
+    validate_tool_result_pairs(request)?;
+
+    let mut body = Map::new();
+    body.insert("model".to_owned(), Value::String(request.model.clone()));
+    body.insert(
+        "max_tokens".to_owned(),
+        Value::Number(Number::from(u64::from(request.max_tokens.ok_or_else(
+            || mapping_error("Anthropic request max_tokens is required"),
+        )?))),
+    );
+
+    if let Some(system) = &request.system
+        && !system.is_empty()
+    {
+        body.insert(
+            "system".to_owned(),
+            Value::Array(encode_request_system_content(system, "request.system")?),
+        );
+    }
+
+    body.insert(
+        "messages".to_owned(),
+        Value::Array(encode_request_messages(&request.messages)?),
+    );
+
+    if !request.tools.is_empty() {
+        body.insert("tools".to_owned(), encode_request_tools(&request.tools));
+    }
+
+    if !request.tools.is_empty() || request.tool_choice != ToolChoice::Auto {
+        body.insert(
+            "tool_choice".to_owned(),
+            encode_request_tool_choice(&request.tool_choice),
+        );
+    }
+
+    insert_optional_f32(&mut body, "temperature", request.temperature)?;
+    insert_optional_f32(&mut body, "top_p", request.top_p)?;
+    insert_optional_u32(&mut body, "top_k", request.top_k);
+
+    if !request.stop.is_empty() {
+        body.insert(
+            "stop_sequences".to_owned(),
+            Value::Array(request.stop.iter().cloned().map(Value::String).collect()),
+        );
+    }
+
+    body.insert("stream".to_owned(), Value::Bool(request.stream));
+    insert_request_extra(&mut body, request);
+
+    Ok(Value::Object(body))
+}
+
+fn encode_request_messages(messages: &[Message]) -> Result<Vec<Value>> {
+    if messages.is_empty() {
+        return Err(mapping_error(
+            "Anthropic request messages must not be empty",
+        ));
+    }
+
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| encode_request_message(message, index))
+        .collect()
+}
+
+fn encode_request_message(message: &Message, index: usize) -> Result<Value> {
+    match message.role {
+        Role::User => Ok(json!({
+            "role": "user",
+            "content": encode_request_user_content(
+                &message.content,
+                format!("messages[{index}].content"),
+            )?,
+        })),
+        Role::Assistant => Ok(json!({
+            "role": "assistant",
+            "content": encode_request_assistant_content(
+                &message.content,
+                format!("messages[{index}].content"),
+            )?,
+        })),
+        Role::Tool => Ok(json!({
+            "role": "user",
+            "content": encode_request_tool_role_content(
+                &message.content,
+                format!("messages[{index}].content"),
+            )?,
+        })),
+        Role::System => Err(mapping_error(format!(
+            "messages[{index}] has system role, which must be encoded in request.system for Anthropic"
+        ))),
+    }
+}
+
+fn encode_request_system_content(content: &[ContentBlock], path: &str) -> Result<Vec<Value>> {
+    encode_non_empty_request_content(content, path, |block, block_path| match block {
+        ContentBlock::Text { text } => Ok(json!({
+            "type": "text",
+            "text": text,
+        })),
+        _ => Err(mapping_error(format!(
+            "{block_path} is not a text block; Anthropic system content only supports text"
+        ))),
+    })
+}
+
+fn encode_request_user_content(content: &[ContentBlock], path: String) -> Result<Vec<Value>> {
+    encode_non_empty_request_content(content, &path, |block, block_path| match block {
+        ContentBlock::Text { text } => Ok(json!({
+            "type": "text",
+            "text": text,
+        })),
+        ContentBlock::Image(source) => Ok(encode_image(source)),
+        ContentBlock::ToolResult { .. } => encode_request_tool_result(block, block_path),
+        ContentBlock::ToolUse { .. } => Err(mapping_error(format!(
+            "{block_path} is a tool_use block but message role is user"
+        ))),
+        ContentBlock::Thinking(_) => Err(mapping_error(format!(
+            "{block_path} is a thinking block but message role is user"
+        ))),
+    })
+}
+
+fn encode_request_tool_role_content(content: &[ContentBlock], path: String) -> Result<Vec<Value>> {
+    encode_non_empty_request_content(content, &path, |block, block_path| match block {
+        ContentBlock::ToolResult { .. } => encode_request_tool_result(block, block_path),
+        _ => Err(mapping_error(format!(
+            "{block_path} is not a tool_result block but message role is tool"
+        ))),
+    })
+}
+
+fn encode_request_assistant_content(content: &[ContentBlock], path: String) -> Result<Vec<Value>> {
+    encode_non_empty_request_content(content, &path, |block, block_path| match block {
+        ContentBlock::Text { text } => Ok(json!({
+            "type": "text",
+            "text": text,
+        })),
+        ContentBlock::ToolUse { id, name, input } => Ok(json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        })),
+        ContentBlock::Thinking(thinking) => encode_backend_thinking(thinking, block_path),
+        ContentBlock::Image(_) => Err(mapping_error(format!(
+            "{block_path} is an image block but message role is assistant"
+        ))),
+        ContentBlock::ToolResult { .. } => Err(mapping_error(format!(
+            "{block_path} is a tool_result block but message role is assistant"
+        ))),
+    })
+}
+
+fn encode_non_empty_request_content<F>(
+    content: &[ContentBlock],
+    path: &str,
+    mut encode: F,
+) -> Result<Vec<Value>>
+where
+    F: FnMut(&ContentBlock, String) -> Result<Value>,
+{
+    if content.is_empty() {
+        return Err(mapping_error(format!("{path} must not be empty")));
+    }
+
+    content
+        .iter()
+        .enumerate()
+        .map(|(index, block)| encode(block, format!("{path}[{index}]")))
+        .collect()
+}
+
+fn encode_request_tool_result(block: &ContentBlock, path: String) -> Result<Value> {
+    let ContentBlock::ToolResult {
+        tool_use_id,
+        content,
+        is_error,
+    } = block
+    else {
+        return Err(mapping_error(format!("{path} must be a tool_result block")));
+    };
+
+    Ok(json!({
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": encode_request_tool_result_content(content, format!("{path}.content"))?,
+        "is_error": is_error,
+    }))
+}
+
+fn encode_request_tool_result_content(
+    content: &[ContentBlock],
+    path: String,
+) -> Result<Vec<Value>> {
+    encode_non_empty_request_content(content, &path, |block, block_path| match block {
+        ContentBlock::Text { text } => Ok(json!({
+            "type": "text",
+            "text": text,
+        })),
+        ContentBlock::Image(source) => Ok(encode_image(source)),
+        ContentBlock::Thinking(_) => Err(mapping_error(format!(
+            "{block_path} is a thinking block but tool_result content cannot contain thinking"
+        ))),
+        ContentBlock::ToolUse { .. } => Err(mapping_error(format!(
+            "{block_path} is a tool_use block but tool_result content cannot contain tool_use"
+        ))),
+        ContentBlock::ToolResult { .. } => Err(mapping_error(format!(
+            "{block_path} is a nested tool_result block"
+        ))),
+    })
+}
+
+fn encode_backend_thinking(thinking: &Thinking, path: String) -> Result<Value> {
+    if thinking.source != Provider::Anthropic {
+        return Err(mapping_error(format!(
+            "{path} must be Anthropic-origin thinking to send to an Anthropic backend"
+        )));
+    }
+
+    let text = thinking
+        .text
+        .as_deref()
+        .ok_or_else(|| mapping_error(format!("{path}.thinking text is required")))?;
+    let opaque = thinking
+        .opaque
+        .as_deref()
+        .ok_or_else(|| mapping_error(format!("{path}.opaque Anthropic signature is required")))?;
+    let signature = std::str::from_utf8(opaque).map_err(|err| {
+        mapping_error(format!(
+            "{path}.opaque Anthropic signature must be valid UTF-8: {err}"
+        ))
+    })?;
+
+    Ok(json!({
+        "type": "thinking",
+        "thinking": text,
+        "signature": signature,
+    }))
+}
+
+fn encode_request_tools(tools: &[ToolDef]) -> Value {
+    Value::Array(
+        tools
+            .iter()
+            .map(|tool| {
+                let mut item = Map::new();
+                item.insert("name".to_owned(), Value::String(tool.name.clone()));
+                if let Some(description) = &tool.description {
+                    item.insert("description".to_owned(), Value::String(description.clone()));
+                }
+                item.insert("input_schema".to_owned(), tool.input_schema.clone());
+                Value::Object(item)
+            })
+            .collect(),
+    )
+}
+
+fn encode_request_tool_choice(choice: &ToolChoice) -> Value {
+    match choice {
+        ToolChoice::Auto => json!({ "type": "auto" }),
+        ToolChoice::None => json!({ "type": "none" }),
+        ToolChoice::Required => json!({ "type": "any" }),
+        ToolChoice::Tool(name) => json!({
+            "type": "tool",
+            "name": name,
+        }),
+    }
+}
+
+fn insert_optional_u32(body: &mut Map<String, Value>, field: &'static str, value: Option<u32>) {
+    if let Some(value) = value {
+        body.insert(
+            field.to_owned(),
+            Value::Number(Number::from(u64::from(value))),
+        );
+    }
+}
+
+fn insert_optional_f32(
+    body: &mut Map<String, Value>,
+    field: &'static str,
+    value: Option<f32>,
+) -> Result<()> {
+    if let Some(value) = value {
+        let number = Number::from_f64(f64::from(value))
+            .ok_or_else(|| mapping_error(format!("request.{field} must be a finite number")))?;
+        body.insert(field.to_owned(), Value::Number(number));
+    }
+
+    Ok(())
+}
+
+fn insert_request_extra(body: &mut Map<String, Value>, request: &IrRequest) {
+    for (key, value) in &request.extra {
+        if ANTHROPIC_REQUEST_CORE_FIELDS.contains(&key.as_str())
+            || !ANTHROPIC_REQUEST_EXTRA_FIELDS.contains(&key.as_str())
+        {
+            continue;
+        }
+        body.insert(key.clone(), value.clone());
+    }
+}
 
 /// Converts a provider-neutral non-streaming response into an Anthropic message.
 pub fn ir_response_to_anthropic(resp: &IrResponse) -> Result<Value> {
@@ -151,10 +482,177 @@ fn mapping_error(message: impl Into<String>) -> ProxyError {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     use super::*;
     use crate::ir::message::{EchoPolicy, Provider};
+
+    #[test]
+    fn encodes_request_with_restored_anthropic_thinking_signature() {
+        let request = IrRequest {
+            model: "claude-sonnet-4-5".to_owned(),
+            system: Some(vec![ContentBlock::Text {
+                text: "Use tools when required.".to_owned(),
+            }]),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "What is the weather in Paris?".to_owned(),
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking(Thinking {
+                            text: Some("Need the weather tool.".to_owned()),
+                            opaque: Some(b"sig_real_anthropic_123".to_vec()),
+                            source: Provider::Anthropic,
+                            echo_policy: EchoPolicy::Always,
+                        }),
+                        ContentBlock::ToolUse {
+                            id: "toolu_weather".to_owned(),
+                            name: "lookup_weather".to_owned(),
+                            input: json!({ "city": "Paris" }),
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "toolu_weather".to_owned(),
+                        content: vec![ContentBlock::Text {
+                            text: "sunny".to_owned(),
+                        }],
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![ToolDef {
+                name: "lookup_weather".to_owned(),
+                description: Some("Fetch weather".to_owned()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    }
+                }),
+            }],
+            tool_choice: ToolChoice::Tool("lookup_weather".to_owned()),
+            max_tokens: Some(256),
+            temperature: Some(0.25),
+            top_p: Some(0.5),
+            top_k: Some(40),
+            stop: vec!["DONE".to_owned()],
+            stream: false,
+            extra: Map::from_iter([
+                ("metadata".to_owned(), json!({ "session": "s_1" })),
+                ("store".to_owned(), json!(false)),
+            ]),
+        };
+
+        let encoded = ir_request_to_anthropic(&request).unwrap();
+
+        assert_eq!(
+            encoded,
+            json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 256,
+                "system": [{
+                    "type": "text",
+                    "text": "Use tools when required."
+                }],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "What is the weather in Paris?"
+                        }]
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "Need the weather tool.",
+                                "signature": "sig_real_anthropic_123"
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_weather",
+                                "name": "lookup_weather",
+                                "input": { "city": "Paris" }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_weather",
+                            "content": [{
+                                "type": "text",
+                                "text": "sunny"
+                            }],
+                            "is_error": false
+                        }]
+                    }
+                ],
+                "tools": [{
+                    "name": "lookup_weather",
+                    "description": "Fetch weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        }
+                    }
+                }],
+                "tool_choice": {
+                    "type": "tool",
+                    "name": "lookup_weather"
+                },
+                "temperature": 0.25,
+                "top_p": 0.5,
+                "top_k": 40,
+                "stop_sequences": ["DONE"],
+                "stream": false,
+                "metadata": { "session": "s_1" }
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_responses_origin_thinking_for_anthropic_backend_request() {
+        let request = IrRequest {
+            model: "claude-sonnet-4-5".to_owned(),
+            system: None,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking(Thinking {
+                    text: Some("Responses reasoning cannot be sent to Anthropic raw.".to_owned()),
+                    opaque: Some(b"enc_payload_from_responses".to_vec()),
+                    source: Provider::Responses,
+                    echo_policy: EchoPolicy::Always,
+                })],
+            }],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_tokens: Some(256),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::new(),
+        };
+
+        let error = ir_request_to_anthropic(&request).unwrap_err();
+
+        assert!(matches!(error, ProxyError::ProtocolMapping(message)
+                if message.contains("Anthropic-origin thinking")));
+    }
 
     #[test]
     fn encodes_response_with_thinking_text_tool_use_and_usage() {

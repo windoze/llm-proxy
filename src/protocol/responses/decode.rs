@@ -12,6 +12,9 @@ use crate::{
         request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
     protocol::tool_ids::validate_responses_tool_result_pairs,
+    reasoning::envelope::{
+        SourceBlock, is_reasoning_envelope, unwrap_from_responses_reasoning_item,
+    },
 };
 
 use super::reasoning::{
@@ -19,6 +22,7 @@ use super::reasoning::{
 };
 
 const PROTOCOL: &str = "responses";
+const GATEWAY_REASONING_ID_PREFIX: &str = "rs_llm_proxy";
 const CORE_REQUEST_FIELDS: &[&str] = &[
     "model",
     "input",
@@ -368,7 +372,16 @@ fn decode_function_call_output_item(item: &Map<String, Value>, path: String) -> 
 
 fn decode_reasoning_item(item: &Map<String, Value>, path: String) -> Result<Message> {
     let reasoning_item = normalize_reasoning_item(item, &path)?;
-    encrypted_content(&reasoning_item, format!("{path}.encrypted_content"))?;
+    let encrypted_content =
+        encrypted_content(&reasoning_item, format!("{path}.encrypted_content"))?;
+    if let Some(thinking) =
+        decode_gateway_anthropic_reasoning_item(&reasoning_item, encrypted_content, &path)?
+    {
+        return Ok(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking(thinking)],
+        });
+    }
 
     Ok(Message {
         role: Role::Assistant,
@@ -381,6 +394,78 @@ fn decode_reasoning_item(item: &Map<String, Value>, path: String) -> Result<Mess
             source: Provider::Responses,
             echo_policy: EchoPolicy::Always,
         })],
+    })
+}
+
+fn decode_gateway_anthropic_reasoning_item(
+    reasoning_item: &Map<String, Value>,
+    encrypted_content: &str,
+    path: &str,
+) -> Result<Option<Thinking>> {
+    let item_value = Value::Object(reasoning_item.clone());
+    let source_block = match unwrap_from_responses_reasoning_item(&item_value) {
+        Ok(source_block) => source_block,
+        Err(err)
+            if has_gateway_reasoning_id(reasoning_item)
+                || is_reasoning_envelope(encrypted_content) =>
+        {
+            return Err(mapping_error(format!(
+                "{path}.encrypted_content gateway envelope is invalid: {err}"
+            )));
+        }
+        Err(_) => return Ok(None),
+    };
+
+    anthropic_thinking_from_source_block(source_block, path).map(Some)
+}
+
+fn has_gateway_reasoning_id(reasoning_item: &Map<String, Value>) -> bool {
+    reasoning_item
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with(GATEWAY_REASONING_ID_PREFIX))
+}
+
+fn anthropic_thinking_from_source_block(source_block: SourceBlock, path: &str) -> Result<Thinking> {
+    if source_block.source != Provider::Anthropic {
+        return Err(mapping_error(format!(
+            "{path}.encrypted_content envelope has source {:?}, expected Anthropic",
+            source_block.source
+        )));
+    }
+
+    let payload = source_block.payload_json()?;
+    let block = payload.as_object().ok_or_else(|| {
+        mapping_error(format!(
+            "{path}.encrypted_content payload must be an object"
+        ))
+    })?;
+    let block_type = required_string(
+        block,
+        "type",
+        format!("{path}.encrypted_content.payload.type"),
+    )?;
+    if block_type != "thinking" {
+        return Err(mapping_error(format!(
+            "{path}.encrypted_content payload.type must be `thinking`"
+        )));
+    }
+    let thinking_text = required_string(
+        block,
+        "thinking",
+        format!("{path}.encrypted_content.payload.thinking"),
+    )?;
+    let signature = required_string(
+        block,
+        "signature",
+        format!("{path}.encrypted_content.payload.signature"),
+    )?;
+
+    Ok(Thinking {
+        text: Some(thinking_text.to_owned()),
+        opaque: Some(signature.as_bytes().to_vec()),
+        source: Provider::Anthropic,
+        echo_policy: EchoPolicy::Always,
     })
 }
 
@@ -1078,6 +1163,74 @@ mod tests {
                 ("store".to_owned(), json!(false)),
             ])
         );
+    }
+
+    #[test]
+    fn unwraps_gateway_anthropic_reasoning_input_to_anthropic_thinking() {
+        let source_block = crate::reasoning::envelope::SourceBlock::from_json(
+            Provider::Anthropic,
+            &json!({
+                "type": "thinking",
+                "thinking": "Need the weather tool.",
+                "signature": "sig_real_anthropic_123"
+            }),
+        )
+        .unwrap();
+        let wrapped =
+            crate::reasoning::envelope::wrap_as_responses_reasoning_item(&source_block).unwrap();
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": [{
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": wrapped["encrypted_content"]
+            }]
+        });
+
+        let request = responses_request_to_ir(&body).unwrap();
+        let ContentBlock::Thinking(thinking) = &request.messages[0].content[0] else {
+            panic!("expected gateway reasoning item to decode as thinking");
+        };
+
+        assert_eq!(thinking.text, Some("Need the weather tool.".to_owned()));
+        assert_eq!(thinking.opaque, Some(b"sig_real_anthropic_123".to_vec()));
+        assert_eq!(thinking.source, Provider::Anthropic);
+        assert_eq!(thinking.echo_policy, EchoPolicy::Always);
+    }
+
+    #[test]
+    fn rejects_tampered_gateway_anthropic_reasoning_input() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let source_block = crate::reasoning::envelope::SourceBlock::from_json(
+            Provider::Anthropic,
+            &json!({
+                "type": "thinking",
+                "thinking": "Need the weather tool.",
+                "signature": "sig_real_anthropic_123"
+            }),
+        )
+        .unwrap();
+        let wrapped =
+            crate::reasoning::envelope::wrap_as_responses_reasoning_item(&source_block).unwrap();
+        let encrypted_content = wrapped["encrypted_content"].as_str().unwrap();
+        let envelope_bytes = STANDARD.decode(encrypted_content).unwrap();
+        let mut envelope: Value = serde_json::from_slice(&envelope_bytes).unwrap();
+        envelope["checksum"] = json!(0);
+        let tampered_encrypted_content = STANDARD.encode(serde_json::to_vec(&envelope).unwrap());
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": [{
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": tampered_encrypted_content
+            }]
+        });
+
+        let error = responses_request_to_ir(&body).unwrap_err();
+
+        assert!(matches!(error, ProxyError::ProtocolMapping(message)
+                if message.contains("gateway envelope is invalid")));
     }
 
     #[test]

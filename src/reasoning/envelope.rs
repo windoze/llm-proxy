@@ -233,6 +233,15 @@ pub fn unwrap(encoded: &str) -> Result<SourceBlock> {
     unwrap_with_store(encoded, &NoopStore)
 }
 
+/// Returns true when a string decodes to this gateway's envelope structure.
+pub fn is_reasoning_envelope(encoded: &str) -> bool {
+    let Ok(bytes) = STANDARD.decode(encoded) else {
+        return false;
+    };
+
+    serde_json::from_slice::<Envelope>(&bytes).is_ok()
+}
+
 /// Decodes an envelope, resolving stateful fallback references through `store`.
 pub fn unwrap_with_store<S: ReasoningStore + ?Sized>(
     encoded: &str,
