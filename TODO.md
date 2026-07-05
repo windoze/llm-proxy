@@ -17,7 +17,7 @@
 
 ## M0 — 项目骨架
 
-### M0-01 `[TODO]` 添加项目依赖
+### [DONE] M0-01 添加项目依赖
 在 `Cargo.toml` 的 `[dependencies]` 加入并锁定合适版本：
 - `tokio`（features: `["full"]`）、`axum`、`tower`、`tower-http`（features: `["trace"]`）
 - `reqwest`（features: `["json", "stream"]`，默认 rustls）
@@ -27,6 +27,11 @@
 - `thiserror`、`anyhow`
 - dev-dependencies: `tokio-test`、`insta`(快照测试)、`wiremock`(mock 后端)
 运行 `cargo build` 确认可编译。注意 edition 已是 2024。
+
+完成记录：
+- 2026-07-06：已添加并锁定所需 dependencies/dev-dependencies，`Cargo.lock` 已更新。
+- `reqwest` 使用当前版本的 `rustls` feature（关闭 default-features）以保持 rustls-only TLS 行为。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build`、`cargo test --all --all-targets` 均通过。
 
 ### M0-02 `[TODO]` 建立目录结构与模块骨架
 按 PLAN.md 的结构创建空模块（每个 `mod.rs` 先放 `//!` 文档注释 + 占位）：
