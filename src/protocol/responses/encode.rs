@@ -32,6 +32,24 @@ const CORE_REQUEST_FIELDS: &[&str] = &[
     "stop",
     "stream",
 ];
+// IR extras may originate from a different frontend protocol; only pass fields
+// that are valid Responses request options across this boundary.
+const RESPONSES_EXTRA_FIELDS: &[&str] = &[
+    "background",
+    "include",
+    "max_tool_calls",
+    "metadata",
+    "parallel_tool_calls",
+    "previous_response_id",
+    "prompt",
+    "reasoning",
+    "service_tier",
+    "store",
+    "stream_options",
+    "text",
+    "truncation",
+    "user",
+];
 
 /// Converts a provider-neutral request into an OpenAI Responses request body.
 pub fn ir_request_to_responses(request: &IrRequest) -> Result<Value> {
@@ -65,7 +83,7 @@ pub fn ir_request_to_responses(request: &IrRequest) -> Result<Value> {
     }
 
     body.insert("stream".to_owned(), Value::Bool(request.stream));
-    insert_request_extra(&mut body, request);
+    insert_request_extra(&mut body, request)?;
 
     Ok(Value::Object(body))
 }
@@ -363,7 +381,7 @@ fn encode_function_call_output_item(
     let ContentBlock::ToolResult {
         tool_use_id,
         content,
-        is_error,
+        is_error: _,
     } = block
     else {
         return Err(mapping_error(format!("{path} must be a tool result")));
@@ -374,7 +392,6 @@ fn encode_function_call_output_item(
         "type": "function_call_output",
         "call_id": call_id,
         "output": encode_tool_output(content)?,
-        "is_error": is_error,
     }))
 }
 
@@ -435,13 +452,44 @@ fn insert_optional_f32(
     Ok(())
 }
 
-fn insert_request_extra(body: &mut Map<String, Value>, request: &IrRequest) {
+fn insert_request_extra(body: &mut Map<String, Value>, request: &IrRequest) -> Result<()> {
     for (key, value) in &request.extra {
-        if CORE_REQUEST_FIELDS.contains(&key.as_str()) {
+        if CORE_REQUEST_FIELDS.contains(&key.as_str())
+            || !RESPONSES_EXTRA_FIELDS.contains(&key.as_str())
+        {
             continue;
         }
         body.insert(key.clone(), value.clone());
     }
+
+    if !body.contains_key("reasoning") {
+        insert_reasoning_from_output_config(body, request.extra.get("output_config"))?;
+    }
+
+    Ok(())
+}
+
+fn insert_reasoning_from_output_config(
+    body: &mut Map<String, Value>,
+    output_config: Option<&Value>,
+) -> Result<()> {
+    let Some(output_config) = output_config else {
+        return Ok(());
+    };
+    let Some(output_config) = output_config.as_object() else {
+        return Err(mapping_error(
+            "request.extra.output_config must be an object when present",
+        ));
+    };
+    let Some(effort) = output_config.get("effort") else {
+        return Ok(());
+    };
+    let effort = effort.as_str().ok_or_else(|| {
+        mapping_error("request.extra.output_config.effort must be a string when present")
+    })?;
+
+    body.insert("reasoning".to_owned(), json!({ "effort": effort }));
+    Ok(())
 }
 
 /// Converts a provider-neutral non-streaming response into a Responses object.
@@ -507,7 +555,7 @@ fn encode_output(response_id: &str, content: &[ContentBlock], status: &str) -> R
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
-                is_error,
+                is_error: _,
             } => {
                 flush_message_item(response_id, status, &mut pending_text, &mut output);
                 let tool_output = encode_tool_output(content)?;
@@ -515,7 +563,6 @@ fn encode_output(response_id: &str, content: &[ContentBlock], status: &str) -> R
                     "type": "function_call_output",
                     "call_id": tool_use_id,
                     "output": tool_output,
-                    "is_error": is_error,
                 }));
             }
             ContentBlock::Image(_) => {
@@ -809,11 +856,48 @@ mod tests {
                 {
                     "type": "function_call_output",
                     "call_id": "call_weather",
-                    "output": "sunny",
-                    "is_error": false
+                    "output": "sunny"
                 }
             ])
         );
+    }
+
+    #[test]
+    fn request_extra_forwards_only_responses_native_fields() {
+        let request = IrRequest {
+            model: "gpt-5.5".to_owned(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_owned(),
+                }],
+            }],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_tokens: Some(64),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::from_iter([
+                ("metadata".to_owned(), json!({ "trace_id": "m5-live" })),
+                ("store".to_owned(), json!(true)),
+                ("output_config".to_owned(), json!({ "effort": "high" })),
+                ("container".to_owned(), json!({ "id": "anthropic-only" })),
+                ("mcp_servers".to_owned(), json!([])),
+            ]),
+        };
+
+        let encoded = ir_request_to_responses(&request).unwrap();
+
+        assert_eq!(encoded["metadata"], json!({ "trace_id": "m5-live" }));
+        assert_eq!(encoded["store"], json!(true));
+        assert_eq!(encoded["reasoning"], json!({ "effort": "high" }));
+        assert!(encoded.get("output_config").is_none());
+        assert!(encoded.get("container").is_none());
+        assert!(encoded.get("mcp_servers").is_none());
     }
 
     #[test]
@@ -1147,8 +1231,7 @@ mod tests {
             json!([{
                 "type": "function_call_output",
                 "call_id": "call_weather",
-                "output": "sunny",
-                "is_error": true
+                "output": "sunny"
             }])
         );
     }

@@ -1,23 +1,25 @@
 ## Execution plan
 
-I will maintain a concise, step-by-step execution log here. I cannot record private chain-of-thought, but this file will include the actionable plan, decisions, blockers, and completed milestones.
-
 1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Review only the files and context needed for that task, including the latest commit if it directly mentions an unfinished issue relevant to the selected task.
-3. Implement the selected task completely, without narrowing scope or introducing workarounds.
-4. Run the required formatting, linting, and tests in the requested order.
-5. Update `TODO.md` to prefix the completed task with `[DONE]` and record completion details, or add a prerequisite task if a concrete blocker prevents completion.
-6. Update this file at key milestones and update `PLAN.md` only if the phase-level plan changes.
-7. Commit all relevant changes for this invocation and stop without starting the next task.
+2. Check the latest commit message only for directly relevant unfinished work tied to that task.
+3. Inspect the task requirements, affected files, and existing validation commands.
+4. Implement the task exactly as specified, adding prerequisite TODO entries only if a concrete blocker makes direct completion impossible.
+5. Run formatting, linting, and tests required by the task and repository conventions.
+6. Update `TODO.md` with a `[DONE]` prefix and completion record if the task is completed, or record any blocker/prerequisite if it cannot be completed.
+7. Commit all task-related changes, then stop without starting the next task.
 
-## Progress log
+## Current task
 
-- Created this invocation plan before inspecting project files.
-- Selected first incomplete task: `M5-06` (`/v1/messages` can route to a Responses backend, with wiremock integration coverage for encrypted reasoning + tool-use round trips).
-- Latest commit is `[M5-05] Implement Responses rich streaming`; it directly provides the stream decoder/encoder needed for this task, with no separate unfinished prerequisite noted.
-- Implementation direction: add temporary pre-M7 route selection for `/v1/messages`, using DeepSeek Chat for `deepseek-*` models and Responses for non-DeepSeek models when `OPENAI_API_ENDPOINT`/`OPENAI_API_KEY` are configured, with an explicit override for tests/operators if needed.
-- Implemented M5-06: `/v1/messages` now routes Anthropic requests to the Responses backend for configured non-DeepSeek models, supports non-streaming and streaming Responses responses, and preserves Responses encrypted reasoning through Anthropic signatures.
-- Added wiremock coverage for non-streaming multi-turn reasoning + tool-use signature round trip and streaming Responses SSE → Anthropic SSE signature delta output.
-- Updated `TESTING.md` with the temporary pre-M7 backend selection behavior.
-- Validation completed: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` all passed.
-- Marked `M5-06` as `[DONE]` in `TODO.md`. No `PLAN.md` update was needed because phase-level sequencing did not change.
+- Selected first incomplete task: `M5-RV` — review M5 chain 4 plus real integration.
+- Latest commit: `[M5-06] Wire Anthropic messages to Responses backend`; no unfinished issue was mentioned in the commit subject/body, and it is directly relevant as the implementation under review.
+- Review focus confirmed: M5 requires Responses `encrypted_content` to round-trip losslessly through an Anthropic `thinking.signature` envelope, plus rich stream index/tool-call correctness.
+- Local prerequisites found: `claude`, `codex`, `.envrc`, `OPENAI_API_ENDPOINT`, and `OPENAI_API_KEY` are present; values must not be printed or committed.
+- Rust validation passed: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+- Live M5 check found a real protocol-boundary blocker: Claude Code sends Anthropic-only `output_config`; the current Anthropic → IR → Responses path forwarded it unchanged, and the Responses backend rejected it with `unknown_parameter`.
+- Fixed extra passthrough: Responses request encoding now forwards only Responses-native extra fields, preserving supported extras such as `metadata`/`store` while dropping Anthropic-only fields before backend submission.
+- Live retry reached the second turn and confirmed tool-use execution, then exposed a second real Responses request mismatch: generated `function_call_output` items included `is_error`, which the backend rejects. The encoder now omits generated `is_error` fields while still decoding optional inbound `is_error` into IR.
+- Raw M5 check showed that simply dropping Claude Code `output_config` made the tool-use round trip work but did not request Responses reasoning. Captured Claude Code request shape uses `output_config: {"effort":"high"}` plus top-level `thinking`; direct backend probing confirmed Responses accepts `reasoning: {"effort":"high"}` and returns reasoning items with `encrypted_content`.
+- Fixed reasoning mapping: Anthropic/Claude `output_config.effort` now maps into Responses `reasoning.effort` while unsupported Anthropic-only fields remain filtered.
+- Final live validation passed: Claude Code 2.1.200 → local `/v1/messages` → real Responses backend `gpt-5.5` completed a two-turn Bash tool-use flow without 400.
+- Final raw real-backend validation passed: a Responses reasoning item was emitted as Anthropic `thinking.signature` on turn 2, then sent back on turn 3 and accepted by the backend, confirming signature → encrypted_content round trip.
+- `TODO.md` has been updated with `[DONE] M5-RV` and completion records. Next step is committing the task changes.

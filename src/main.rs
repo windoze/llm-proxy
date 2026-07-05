@@ -1057,6 +1057,7 @@ mod tests {
             }],
             "tool_choice": "auto",
             "max_output_tokens": 256,
+            "reasoning": { "effort": "high" },
             "stream": false,
             "store": false,
             "include": ["reasoning.encrypted_content"]
@@ -1098,8 +1099,7 @@ mod tests {
                 {
                     "type": "function_call_output",
                     "call_id": "call_weather_1",
-                    "output": "sunny and 21C",
-                    "is_error": false
+                    "output": "sunny and 21C"
                 },
                 {
                     "type": "message",
@@ -1118,6 +1118,7 @@ mod tests {
             }],
             "tool_choice": "auto",
             "max_output_tokens": 256,
+            "reasoning": { "effort": "high" },
             "stream": false,
             "store": false,
             "include": ["reasoning.encrypted_content"]
@@ -1213,6 +1214,11 @@ mod tests {
                 }],
                 "tool_choice": { "type": "auto" },
                 "max_tokens": 256,
+                "output_config": { "effort": "high" },
+                "thinking": { "type": "adaptive", "display": "omitted" },
+                "context_management": {
+                    "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }]
+                },
                 "stream": false
             }),
         )
@@ -1294,6 +1300,11 @@ mod tests {
                 }],
                 "tool_choice": { "type": "auto" },
                 "max_tokens": 256,
+                "output_config": { "effort": "high" },
+                "thinking": { "type": "adaptive", "display": "omitted" },
+                "context_management": {
+                    "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }]
+                },
                 "stream": false
             }),
         )
