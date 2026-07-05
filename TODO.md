@@ -98,7 +98,7 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 
 ## M1 — IR 数据结构 + OpenAI Chat 解析
 
-### M1-01 `[TODO]` 定义 IR 内容块 (`ir/message.rs`)
+### [DONE] M1-01 定义 IR 内容块 (`ir/message.rs`)
 定义核心类型（`serde` 可序列化，字段用 `Option` 表达可选）：
 - `enum Role { System, User, Assistant, Tool }`
 - `enum ContentBlock { Text{text}, Image(ImageSource), ToolUse{id,name,input:serde_json::Value},
@@ -109,6 +109,11 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - `enum ImageSource { Url(String), Base64{media_type:String,data:String} }`
 - `struct Message { role:Role, content:Vec<ContentBlock> }`
 细节见 DESIGN §2.1、§4.2。为所有类型 derive `Debug, Clone, PartialEq`。
+
+完成记录：
+- 2026-07-06：已在 `src/ir/message.rs` 定义 `Role`、`ContentBlock`、`Thinking`、`EchoPolicy`、`Provider`、`ImageSource` 与 `Message`，覆盖 DESIGN §2.1/§4.2 要求的 text/image/tool_use/tool_result/thinking 内容块模型。
+- 所有类型已 derive `Debug, Clone, PartialEq` 并支持 serde 序列化/反序列化；因后续 M1 任务才会接入解析/编码，已对该 staged IR 模块添加局部 dead-code allowance，避免当前阶段 lint 噪音。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M1-02 `[TODO]` 定义 IR 统一请求 (`ir/request.rs`)
 - `struct IrRequest { model:String, system:Option<Vec<ContentBlock>>, messages:Vec<Message>,

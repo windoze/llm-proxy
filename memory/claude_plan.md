@@ -1,32 +1,17 @@
-# Execution Plan
+## Execution plan
 
-This file records the actionable plan, decisions, and progress for the current invocation.
-
-## Current objective
-
-Complete exactly `M0-RV [TODO] 【Review】M0 骨架`, then stop after updating task records and committing the result.
-
-## Step-by-step plan
-
-1. Read `TODO.md` first to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Check the latest commit message only for unfinished issues directly relevant to that selected task.
-3. Read the selected task details, dependencies, validation requirements, and any relevant project context.
-4. Inspect only the code and documentation needed to implement that task correctly.
-5. Implement the task without changing unrelated behavior or using workarounds.
-6. Run formatting, linting, and relevant tests in the requested order; run the full suite if code changes require it.
-7. If validation exposes an unscheduled failing test or blocker, fix it if in scope or add the minimum prerequisite task to `TODO.md`, commit that bookkeeping, and stop.
-8. When the selected task is complete, update `TODO.md` by prefixing the task heading with `[DONE]` and filling its completion record.
-9. Update `PLAN.md` only if the phase-level plan changes.
-10. Commit all files changed for this task with a descriptive message and the required co-author trailer.
+1. Read `TODO.md` and identify the first task whose heading is not prefixed with `[DONE]`.
+2. Review only the files and recent commit context needed to understand that task and its direct prerequisites.
+3. Implement the task exactly as specified, avoiding scope changes or workaround behavior.
+4. Run the required formatting, linting, and tests in the requested order for any code changes.
+5. Update `TODO.md` by prefixing the completed task title with `[DONE]` and filling in its completion record.
+6. Update this file when a key step completes or the plan materially changes.
+7. Commit all task-related changes with a descriptive message and the required co-author trailer.
+8. Stop after completing and committing exactly one task.
 
 ## Progress
 
-- 2026-07-06: Initial execution plan refreshed before running project commands for this invocation.
-- 2026-07-06: Read `TODO.md`; selected `M0-05` as the first incomplete task. Latest commit was `M0-04` and does not add an unfinished issue that changes this task.
-- 2026-07-06: Implemented `POST /passthrough` with `LLM_PROXY_UPSTREAM_URL`, shared `reqwest::Client`, streaming upstream responses, status preservation, and `content-type` passthrough.
-- 2026-07-06: Added route tests for request body forwarding, response byte preservation, `content-type` passthrough, and missing upstream URL configuration errors.
-- 2026-07-06: Validation passed with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo build --quiet`, and `cargo test --all --all-targets --quiet`; `TODO.md` now marks `M0-05` as done.
-- 2026-07-06: Read `TODO.md`; selected `M0-RV` as the first incomplete task for this invocation.
-- 2026-07-06: Reviewed the M0 source structure and validation criteria; no PLAN/TODO deviations were found for the M0 skeleton.
-- 2026-07-06: Validation passed with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo build --quiet`, `cargo test --all --all-targets --quiet`, and live `curl` checks for `/health` plus streaming SSE passthrough byte preservation.
-- 2026-07-06: Updated `TODO.md` to mark `M0-RV` as done with its completion record.
+- Identified `M1-01` as the first incomplete task: define IR content block types in `src/ir/message.rs`.
+- Added the canonical role, content block, thinking, provider, image source, and message IR types in `src/ir/message.rs`.
+- Validated with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+- Marked `M1-01` as `[DONE]` in `TODO.md` with a completion record.
