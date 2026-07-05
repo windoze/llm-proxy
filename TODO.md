@@ -314,10 +314,16 @@ IR content → Anthropic `content` block 数组；`ToolUse` → `tool_use` block
 - 已实现 `tool_id_map_from_request` / `validate_tool_result_pairs`，按 IR 请求历史扫描 assistant `ToolUse` 与 user/tool `ToolResult`，拒绝未知结果 ID、重复结果、重复 tool-use ID、错误 role 上的工具块和未完成配对，覆盖多 tool、多轮、结果顺序不同的配对场景。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-07 `[TODO]` DeepSeek 消息交替规整 (`protocol/openai_chat/encode.rs`)
+### [DONE] M2-07 DeepSeek 消息交替规整 (`protocol/openai_chat/encode.rs`)
 IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处理——合并连续同 role 消息
 （尤其 Anthropic 把多个 tool_result 放一个 user 消息、或拆成连续 user 的情况），DESIGN §6.4。
 应用 `param_blocklist` 静默 drop、`n>1` 拒绝。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/openai_chat/encode.rs` 并从 `protocol::openai_chat` 暴露 encoder，提供 `ir_request_to_chat` 将统一 IR 请求编码为 OpenAI Chat/DeepSeek 兼容请求。
+- 已在编码前合并连续同 role IR 消息，支持 system 注入、user text/image 内容、assistant text/reasoning/tool_calls、Anthropic-style `ToolResult` 到 Chat `role:"tool"` 消息的拆分，并接入 M2-06 工具 ID 配对校验以保持 tool_call_id/tool_use_id 不错位。
+- 已按 profile 应用 `param_blocklist` 静默丢弃 DeepSeek 不支持参数，保留/归一 `reasoning_effort`，并在 DeepSeek profile 下拒绝 `n > 1`；新增单元测试覆盖严格交替规整、多 tool_result、参数丢弃、reasoning 回传策略与多 choice 拒绝。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-08 `[TODO]` 装配链 3 端到端路由
 加 `POST /v1/messages`（Anthropic 端点）：解析请求→IR→按 profile 构造 Chat 请求→调 DeepSeek→
