@@ -133,13 +133,19 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - 新增单元测试覆盖 request/response serde 形状、provider `extra` 直通参数、工具选择、停止原因与 usage 字段。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M1-03 `[TODO]` 定义流式 IR event (`ir/event.rs`)
+### [DONE] M1-03 定义流式 IR event (`ir/event.rs`)
 `enum IrEvent`，至少含：
 `MessageStart{id,model}`、`BlockStart{index:usize, block:BlockKind}`、
 `TextDelta{index,text}`、`ThinkingDelta{index,text}`、`ToolUseDelta{index,partial_json:String}`、
 `BlockStop{index}`、`MessageDelta{stop_reason:Option<StopReason>, usage:Option<Usage>}`、`MessageStop`。
 `enum BlockKind { Text, Thinking, ToolUse{id,name} }`。
 这是流式转换的中间语言，encoder/decoder 只与它交互（DESIGN §6.1）。
+
+完成记录：
+- 2026-07-06：已在 `src/ir/event.rs` 定义 provider-neutral `IrEvent` 与 `BlockKind`，覆盖 message/block lifecycle、text/thinking/tool-use delta、stop reason 与 usage 更新事件。
+- 所有新增事件类型已 derive `Debug, Clone, PartialEq, Serialize, Deserialize`，并沿用 staged IR 模块的局部 dead-code allowance，等待后续流式 decoder/encoder 任务接入。
+- 新增单元测试覆盖 tool-use block start 与 message delta 的 serde 形状。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M1-04 `[TODO]` 定义 provider capability profile trait (`provider/mod.rs`)
 定义 `trait CapabilityProfile`，方法覆盖 DESIGN §5 的能力：
