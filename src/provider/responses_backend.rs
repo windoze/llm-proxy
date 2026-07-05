@@ -1,6 +1,6 @@
 //! HTTP client for OpenAI Responses-compatible upstream backends.
 
-// M5-06 wires this staged backend client into the HTTP routes.
+// The route layer uses this client for the rich Responses backend bridge.
 #![allow(dead_code)]
 
 use serde_json::Value;

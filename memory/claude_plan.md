@@ -1,34 +1,23 @@
-# Execution Plan
+## Execution plan
 
-I will follow `TODO.md` as the authoritative task list and complete exactly the first task whose heading is not prefixed with `[DONE]`.
+I will maintain a concise, step-by-step execution log here. I cannot record private chain-of-thought, but this file will include the actionable plan, decisions, blockers, and completed milestones.
 
-1. Read `TODO.md` first and identify the first incomplete task by heading prefix.
-2. Check recent repository state only as needed for that task, including the latest commit if it directly mentions unfinished work relevant to the selected task.
-3. Inspect the files and existing implementation related to the selected task.
-4. Implement the task completely, or add the minimum prerequisite task to `TODO.md` if a concrete blocker makes completion impossible.
-5. Run formatting, linting, and relevant/full tests as required by the task and repository policy.
-6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and filling its completion record, or document any blocker/prerequisite without marking it done.
-7. Update this plan file at major milestones.
-8. Commit all task-related changes with a descriptive message and the required co-author trailer.
-9. Stop after this one task.
+1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
+2. Review only the files and context needed for that task, including the latest commit if it directly mentions an unfinished issue relevant to the selected task.
+3. Implement the selected task completely, without narrowing scope or introducing workarounds.
+4. Run the required formatting, linting, and tests in the requested order.
+5. Update `TODO.md` to prefix the completed task with `[DONE]` and record completion details, or add a prerequisite task if a concrete blocker prevents completion.
+6. Update this file at key milestones and update `PLAN.md` only if the phase-level plan changes.
+7. Commit all relevant changes for this invocation and stop without starting the next task.
 
-## Current Invocation
+## Progress log
 
-Selected task: `M5-05` — implement rich-to-rich streaming conversion from Responses SSE through IR events to Anthropic SSE.
-
-Task-specific steps:
-
-1. Inspect the existing Responses non-streaming decoder, Anthropic SSE encoder, stream modules, and any prior Chat SSE decoder patterns.
-2. Add `stream/responses_decoder.rs` to convert Responses SSE events into provider-neutral `IrEvent`s while preserving block indexes and reasoning/tool-call structure.
-3. Reuse or extend the existing Anthropic SSE encoder so the decoded IR event stream emits valid Anthropic SSE events.
-4. Add focused unit tests for Responses text/reasoning/function-call streaming, index/type alignment, and end-to-end Responses SSE → IR event → Anthropic SSE behavior.
-5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. Mark `M5-05` as `[DONE]` in `TODO.md`, update this file with completion status, and commit the task changes.
-
-## Progress Update
-
-Implemented M5-05. Added `stream::responses_decoder` for Responses SSE → IR event decoding with strict `output_index` alignment, text/reasoning/function-call lifecycle handling, usage/status decoding, and encrypted-content recovery from `output_item.done` or terminal `response.output`. Extended streaming IR with `ThinkingMetadata{source,opaque}` so rich reasoning metadata is not lost, and taught Anthropic SSE encoding to emit Responses-origin metadata as a wrapped `signature_delta`. Added coverage for direct decoding, terminal encrypted-content fallback, missing encrypted-content rejection, Responses SSE → IR → Anthropic SSE signature deltas, and Responses stream encoder metadata preservation.
-
-## Completion Update
-
-`M5-05` is marked `[DONE]` in `TODO.md` with implementation notes and validation results. No phase-level `PLAN.md` update was needed.
+- Created this invocation plan before inspecting project files.
+- Selected first incomplete task: `M5-06` (`/v1/messages` can route to a Responses backend, with wiremock integration coverage for encrypted reasoning + tool-use round trips).
+- Latest commit is `[M5-05] Implement Responses rich streaming`; it directly provides the stream decoder/encoder needed for this task, with no separate unfinished prerequisite noted.
+- Implementation direction: add temporary pre-M7 route selection for `/v1/messages`, using DeepSeek Chat for `deepseek-*` models and Responses for non-DeepSeek models when `OPENAI_API_ENDPOINT`/`OPENAI_API_KEY` are configured, with an explicit override for tests/operators if needed.
+- Implemented M5-06: `/v1/messages` now routes Anthropic requests to the Responses backend for configured non-DeepSeek models, supports non-streaming and streaming Responses responses, and preserves Responses encrypted reasoning through Anthropic signatures.
+- Added wiremock coverage for non-streaming multi-turn reasoning + tool-use signature round trip and streaming Responses SSE → Anthropic SSE signature delta output.
+- Updated `TESTING.md` with the temporary pre-M7 backend selection behavior.
+- Validation completed: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` all passed.
+- Marked `M5-06` as `[DONE]` in `TODO.md`. No `PLAN.md` update was needed because phase-level sequencing did not change.

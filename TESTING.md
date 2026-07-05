@@ -72,6 +72,9 @@ set -a && source .envrc && set +a
 
 ```bash
 # 监听地址默认 127.0.0.1:8080，可用 LLM_PROXY_ADDR 覆盖
+# M7 模型路由完成前，/v1/messages 默认将 deepseek-* 模型发往 Chat 后端，
+# 其他模型在 OPENAI_API_ENDPOINT/OPENAI_API_KEY 存在时发往 Responses 后端；
+# 可用 LLM_PROXY_ANTHROPIC_MESSAGES_BACKEND=chat|responses|auto 显式覆盖。
 # 打开详细日志便于观察转换过程
 RUST_LOG=llm_proxy=debug,info cargo run
 ```
