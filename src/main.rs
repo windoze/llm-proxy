@@ -25,6 +25,10 @@ use crate::{
             stream::ir_events_to_anthropic_sse,
         },
         openai_chat::{decode::chat_response_to_ir, encode::ir_request_to_chat},
+        responses::{
+            decode::responses_request_to_ir, encode::ir_response_to_responses,
+            stream::ir_events_to_responses_sse,
+        },
     },
     provider::{CapabilityProfile, deepseek::DeepSeek},
     stream::{chat_decoder::chat_sse_to_ir_events, sse::parse_openai_chat_sse},
@@ -110,6 +114,7 @@ fn app_with_state(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/passthrough", post(passthrough))
         .route("/v1/messages", post(anthropic_messages))
+        .route("/v1/responses", post(openai_responses))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
@@ -178,6 +183,24 @@ async fn anthropic_messages(
     }
 }
 
+/// Handles OpenAI Responses API requests by proxying them to a Chat-compatible backend.
+async fn openai_responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> error::Result<Response> {
+    let profile = DeepSeek;
+    let ir_request = responses_request_to_ir(&body)?;
+    let chat_body = ir_request_to_chat(&ir_request, &profile)?;
+    let upstream_response = send_chat_request(&state, &headers, chat_body).await?;
+
+    if ir_request.stream {
+        chat_stream_to_responses_response(upstream_response).await
+    } else {
+        chat_json_to_responses_response(upstream_response).await
+    }
+}
+
 async fn send_chat_request(
     state: &AppState,
     headers: &HeaderMap,
@@ -204,6 +227,14 @@ async fn chat_json_to_anthropic_response(
     Ok(Json(ir_response_to_anthropic(&ir_response)).into_response())
 }
 
+async fn chat_json_to_responses_response(
+    upstream_response: reqwest::Response,
+) -> error::Result<Response> {
+    let chat_response = upstream_response.json::<Value>().await?;
+    let ir_response = chat_response_to_ir(&chat_response)?;
+    Ok(Json(ir_response_to_responses(&ir_response)).into_response())
+}
+
 async fn chat_stream_to_anthropic_response(
     upstream_response: reqwest::Response,
 ) -> error::Result<Response> {
@@ -212,6 +243,24 @@ async fn chat_stream_to_anthropic_response(
     let anthropic_sse = ir_events_to_anthropic_sse(ir_events);
 
     let mut response = Response::new(Body::from_stream(anthropic_sse));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+async fn chat_stream_to_responses_response(
+    upstream_response: reqwest::Response,
+) -> error::Result<Response> {
+    let chat_sse = parse_openai_chat_sse(upstream_response.bytes_stream());
+    let ir_events = chat_sse_to_ir_events(chat_sse);
+    let responses_sse = ir_events_to_responses_sse(ir_events);
+
+    let mut response = Response::new(Body::from_stream(responses_sse));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
@@ -273,10 +322,31 @@ fn upstream_bearer_token<'a>(
         Some(api_key) => api_key.to_str().map_err(|err| {
             error::ProxyError::ProtocolMapping(format!("x-api-key header is invalid: {err}"))
         }),
-        None => Err(error::ProxyError::Config(format!(
-            "missing {DEEPSEEK_API_KEY_ENV}"
-        ))),
+        None => match headers.get(header::AUTHORIZATION) {
+            Some(authorization) => bearer_token_from_authorization(authorization),
+            None => Err(error::ProxyError::Config(format!(
+                "missing {DEEPSEEK_API_KEY_ENV}"
+            ))),
+        },
     }
+}
+
+fn bearer_token_from_authorization(value: &HeaderValue) -> error::Result<&str> {
+    let value = value.to_str().map_err(|err| {
+        error::ProxyError::ProtocolMapping(format!("authorization header is invalid: {err}"))
+    })?;
+    let (scheme, token) = value.split_once(' ').ok_or_else(|| {
+        error::ProxyError::ProtocolMapping(
+            "authorization header must use Bearer authentication".to_owned(),
+        )
+    })?;
+    let token = token.trim();
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+        return Err(error::ProxyError::ProtocolMapping(
+            "authorization header must use Bearer authentication".to_owned(),
+        ));
+    }
+    Ok(token)
 }
 
 fn parse_chat_completions_url(url: &str) -> error::Result<reqwest::Url> {
@@ -315,7 +385,10 @@ mod tests {
     use super::*;
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode, header::CONTENT_TYPE},
+        http::{
+            Request, StatusCode,
+            header::{AUTHORIZATION, CONTENT_TYPE},
+        },
     };
     use serde_json::json;
     use tower::ServiceExt;
@@ -364,8 +437,36 @@ mod tests {
         .unwrap()
     }
 
+    /// Posts a Codex-style OpenAI Responses request to the in-process router.
+    async fn post_responses(app: Router, body: Value) -> Response {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(CONTENT_TYPE, "application/json")
+                .header(AUTHORIZATION, "Bearer client-placeholder")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
     /// Reads a successful Anthropic SSE response body for snapshot assertions.
     async fn anthropic_sse_body(response: Response) -> String {
+        let status = response.status();
+        let content_type = response.headers().get(CONTENT_TYPE).cloned();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert_eq!(status, StatusCode::OK, "unexpected response body: {body}");
+        assert_eq!(content_type.as_ref().unwrap(), "text/event-stream");
+
+        body
+    }
+
+    /// Reads a successful Responses SSE response body for route assertions.
+    async fn responses_sse_body(response: Response) -> String {
         let status = response.status();
         let content_type = response.headers().get(CONTENT_TYPE).cloned();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -471,6 +572,75 @@ mod tests {
             }],
             "tool_choice": { "type": "auto" },
             "max_tokens": 256,
+            "stream": true
+        })
+    }
+
+    /// Codex-style text-only request sample for the OpenAI Responses route.
+    fn codex_plain_text_request(stream: bool) -> Value {
+        json!({
+            "model": "deepseek-chat",
+            "instructions": "You are Codex. Answer concisely.",
+            "developer": "Prefer direct answers.",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "Say hello from the proxy."
+                }]
+            }],
+            "max_output_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "reasoning_effort": "low",
+            "stream": stream
+        })
+    }
+
+    /// Codex-style multi-turn tool-use request sample for the OpenAI Responses route.
+    fn codex_tool_use_request() -> Value {
+        json!({
+            "model": "deepseek-chat",
+            "instructions": "Use tools when required.",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "What is the weather in Paris?"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_weather_1",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Paris\"}",
+                    "status": "completed"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_weather_1",
+                    "output": "sunny and 21C"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Should I bring an umbrella?"
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "lookup_weather",
+                "description": "Look up current weather for a city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            }],
+            "tool_choice": "auto",
+            "max_output_tokens": 256,
             "stream": true
         })
     }
@@ -652,6 +822,282 @@ mod tests {
                     "output_tokens": 4
                 }
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_route_translates_non_streaming_request_to_chat_backend() {
+        let upstream = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header_is("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl_response_1",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "hello from DeepSeek"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 4,
+                    "prompt_cache_hit_tokens": 2
+                }
+            })))
+            .mount(&upstream)
+            .await;
+
+        let response = post_responses(
+            test_app_with_chat_backend(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+            ),
+            codex_plain_text_request(false),
+        )
+        .await;
+        assert_eq!(
+            recorded_chat_request(&upstream).await,
+            json!({
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You are Codex. Answer concisely."
+                            },
+                            {
+                                "type": "text",
+                                "text": "Prefer direct answers."
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": "Say hello from the proxy."
+                    }
+                ],
+                "max_tokens": 64,
+                "stream": false,
+                "reasoning_effort": "high"
+            })
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["created_at"].as_u64().unwrap() > 0);
+        value["created_at"] = json!(0);
+
+        assert_eq!(
+            value,
+            json!({
+                "id": "chatcmpl_response_1",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "model": "deepseek-chat",
+                "output": [{
+                    "id": "msg_chatcmpl_response_1_0",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "hello from DeepSeek",
+                        "annotations": []
+                    }]
+                }],
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "store": false,
+                "usage": {
+                    "input_tokens": 11,
+                    "input_tokens_details": {
+                        "cached_tokens": 2
+                    },
+                    "output_tokens": 4,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 0
+                    },
+                    "total_tokens": 15
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_route_streams_tool_use_chat_sse_as_responses_sse() {
+        let upstream = MockServer::start().await;
+        let upstream_sse = openai_chat_sse(&[
+            json!({
+                "id": "chatcmpl_responses_tool",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "role": "assistant" },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_responses_tool",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_weather_2",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "arguments": "{\"city\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_responses_tool",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": ":\"Paris\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 38,
+                    "completion_tokens": 7
+                }
+            }),
+        ]);
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(upstream_sse),
+            )
+            .mount(&upstream)
+            .await;
+
+        let response = post_responses(
+            test_app_with_chat_backend(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+            ),
+            codex_tool_use_request(),
+        )
+        .await;
+        assert_eq!(
+            recorded_chat_request(&upstream).await,
+            json!({
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Use tools when required."
+                    },
+                    {
+                        "role": "user",
+                        "content": "What is the weather in Paris?"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_weather_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "arguments": "{\"city\":\"Paris\"}"
+                            }
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_weather_1",
+                        "content": "sunny and 21C"
+                    },
+                    {
+                        "role": "user",
+                        "content": "Should I bring an umbrella?"
+                    }
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_weather",
+                        "description": "Look up current weather for a city.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": { "type": "string" }
+                            },
+                            "required": ["city"]
+                        }
+                    }
+                }],
+                "tool_choice": "auto",
+                "max_tokens": 256,
+                "stream": true
+            })
+        );
+
+        let body = responses_sse_body(response).await;
+        assert!(body.contains("event: response.created\n"));
+        assert!(body.contains("event: response.output_item.added\n"));
+        assert!(body.contains("event: response.function_call_arguments.delta\n"));
+        assert!(body.contains("event: response.function_call_arguments.done\n"));
+        assert!(body.contains("\"call_id\":\"call_weather_2\""));
+        assert!(body.contains("\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\""));
+        assert!(body.contains("\"status\":\"completed\""));
+        assert!(body.contains("\"usage\":{\"input_tokens\":38"));
+        assert!(body.contains("event: response.completed\n"));
+    }
+
+    #[test]
+    fn authorization_bearer_header_can_supply_upstream_token() {
+        let state = AppState {
+            http_client: reqwest::Client::new(),
+            passthrough_upstream_url: None,
+            chat_completions_url: "http://127.0.0.1:9/chat/completions".to_owned(),
+            chat_api_key: None,
+            anthropic_default_max_tokens: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer client-token"),
+        );
+
+        assert_eq!(
+            upstream_bearer_token(&state, &headers).unwrap(),
+            "client-token"
         );
     }
 

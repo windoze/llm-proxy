@@ -415,9 +415,16 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 新增单元测试覆盖 Responses `call_id` 双向映射、多轮 agent loop ID 连续性、孤立 `function_call_output`、重复 output 与未回答 `function_call`。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M3-05 `[TODO]` 装配链 1 端到端路由
+### [DONE] M3-05 装配链 1 端到端路由
 加 `POST /v1/responses`（Responses 端点）：解析→IR→Chat 请求→调 DeepSeek→编码返回（流式/非流式）。
 `developer/system` 消息处理、`max_output_tokens` 映射、鉴权头翻译、profile 应用。
+
+完成记录：
+- 2026-07-06：已新增 `POST /v1/responses`，将 Codex/Responses 请求解析为 IR，再通过 DeepSeek profile 编码为 Chat Completions 请求并调用配置的 Chat 后端。
+- 已覆盖非流式 Chat 响应 → Responses JSON 编码，以及 Chat SSE → IR event → Responses SSE 的流式返回；响应头设置为 `text/event-stream` 并禁用缓存。
+- 已处理 Responses `instructions`/`developer` system hoist、`max_output_tokens` → Chat `max_tokens`、DeepSeek profile 参数过滤/`reasoning_effort` 归一，以及 Responses `Authorization: Bearer` 到上游 Bearer token 的鉴权头翻译。
+- 新增路由测试覆盖非流式文本响应、流式 tool-use 多轮 ID 连续性与 bearer token fallback。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M3-06 `[TODO]` 抓取 Codex 真实 payload（解阻塞 M4）⚠️
 搭一个临时的假 Responses 端点（或复用 M0 passthrough + dump），让真实 Codex 打过来，
