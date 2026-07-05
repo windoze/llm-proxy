@@ -33,7 +33,7 @@
 - `reqwest` 使用当前版本的 `rustls` feature（关闭 default-features）以保持 rustls-only TLS 行为。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build`、`cargo test --all --all-targets` 均通过。
 
-### M0-02 `[TODO]` 建立目录结构与模块骨架
+### [DONE] M0-02 建立目录结构与模块骨架
 按 PLAN.md 的结构创建空模块（每个 `mod.rs` 先放 `//!` 文档注释 + 占位）：
 ```
 src/main.rs
@@ -45,6 +45,10 @@ src/provider/{mod.rs}
 src/stream/{mod.rs}
 ```
 在 `main.rs` 用 `mod` 声明所有顶层模块。确保 `cargo build` 通过（允许 dead_code warning）。
+
+完成记录：
+- 2026-07-06：已按 PLAN.md/M0-02 创建 `src/config.rs`、`src/error.rs`、`src/ir/*`、`src/protocol/*`、`src/provider/mod.rs`、`src/stream/mod.rs` 模块骨架，并在 `src/main.rs` 声明顶层模块。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
 ### M0-03 `[TODO]` 定义统一错误类型
 在 `src/error.rs` 定义 `ProxyError`（`thiserror`），至少涵盖：
