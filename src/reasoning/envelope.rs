@@ -564,6 +564,42 @@ mod tests {
     }
 
     #[test]
+    fn responses_encrypted_content_client_echo_round_trips_tool_use_payload_bytes() {
+        let payload = br#"{"type":"thinking","thinking":"Need weather before final answer.","signature":"sig_real_anthropic_tool_1","tool_use":{"type":"tool_use","id":"toolu_weather_1","name":"lookup_weather","input":{"city":"Paris"}}}"#;
+        let source = SourceBlock::new(Provider::Anthropic, payload.to_vec());
+
+        let item = wrap_as_responses_reasoning_item(&source).unwrap();
+        let echoed_item = json!({
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": item["encrypted_content"].as_str().unwrap()
+        });
+
+        let decoded = unwrap_from_responses_reasoning_item(&echoed_item).unwrap();
+
+        assert_eq!(decoded.source, Provider::Anthropic);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn anthropic_signature_client_echo_round_trips_tool_use_payload_bytes() {
+        let payload = br#"{"type":"reasoning","id":"rs_weather_1","summary":[{"type":"summary_text","text":"Need current weather."}],"encrypted_content":"enc_weather_tool_opaque","status":"completed","function_call":{"type":"function_call","call_id":"call_weather_1","name":"lookup_weather","arguments":"{\"city\":\"Paris\"}"}}"#;
+        let source = SourceBlock::new(Provider::Responses, payload.to_vec());
+
+        let signature = wrap_as_signature(&source).unwrap();
+        let echoed_block = json!({
+            "type": "thinking",
+            "thinking": "Need weather before final answer.",
+            "signature": signature
+        });
+
+        let decoded = unwrap_from_signature(echoed_block["signature"].as_str().unwrap()).unwrap();
+
+        assert_eq!(decoded.source, Provider::Responses);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
     fn inline_envelope_does_not_use_store_when_under_limit() {
         let store = MemoryStore::default();
         let limits = EnvelopeLimits::new(TEST_OPAQUE_LIMIT_BYTES);

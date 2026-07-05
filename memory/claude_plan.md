@@ -8,15 +8,12 @@
 6. Update TODO.md by prefixing the completed task heading with [DONE] and filling in its completion record; update PLAN.md only if phase-level sequencing changes.
 7. Commit all resulting changes with a descriptive message and the required co-author trailer, then stop without starting the next task.
 
-Progress: M4-05 selected for this invocation.
+Progress: M4-06 selected for this invocation.
 
 Checkpoint:
-- First incomplete task identified: M4-05, length-limit protection and default-disabled fallback interface.
-- Latest commit completed M4-04 and does not mention unfinished work that blocks M4-05.
-- Implementation plan: inspect the M4-05 task body and existing `reasoning/envelope.rs` implementation, add configurable maximum opaque payload protection, expose a disabled-by-default fallback storage interface rather than silently accepting oversized payloads, cover both Responses and Anthropic envelope paths as applicable, add focused unit tests, then run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Completion plan: after validation, mark M4-05 `[DONE]` in `TODO.md`, record the validation outcome, update this file, and commit the completed task.
-- Implemented `EnvelopeLimits`, `ReasoningStore`, and default `NoopStore`; default wrap/unwrap paths remain stateless and oversized envelopes fail unless a store is explicitly supplied.
-- Added store-reference envelopes for oversized payloads and wired fallback-aware APIs for raw envelopes, Responses reasoning items, and Anthropic signatures.
-- Added unit tests for under-limit inline behavior, disabled-store rejection, configured-store round-trip, Responses `encrypted_content` limits, and Anthropic prefixed signature limits.
+- First incomplete task identified: M4-06, envelope round-trip tests.
+- Latest commit completed M4-05 and does not mention unfinished work that blocks M4-06.
+- Implementation plan: read the M4-06 task body, inspect latest commit for directly relevant unfinished work, review existing reasoning envelope tests and protocol surfaces, add the required round-trip tests for Responses reasoning items and Anthropic thinking signatures, run formatting, clippy, and the relevant/full test suite as required, then mark M4-06 `[DONE]` with a completion record.
+- Added explicit simulated client-echo round-trip tests for Responses `encrypted_content` and Anthropic `signature`, both preserving tool-use-related opaque payload bytes exactly.
 - Completed validation: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked M4-05 `[DONE]` in `TODO.md` with its completion record. Next step is committing the completed task changes.
+- Marked M4-06 `[DONE]` in `TODO.md` with its completion record. Next step is committing the completed task changes.
