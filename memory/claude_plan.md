@@ -1,20 +1,13 @@
 # Execution Plan
 
-I will follow the project task order exactly and complete only the first incomplete task from `TODO.md`.
+I cannot include private chain-of-thought, but I will keep this file updated with the concrete plan, decisions, and progress for the current invocation.
 
-1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Check the latest commit message only for unfinished work that is directly relevant to that task.
-3. Inspect the files and tests needed for that single task.
-4. Implement the task completely, avoiding workaround behavior or unrelated fixes.
-5. Run the required formatting, linting, and tests for the changed code.
-6. If validation exposes unscheduled failures, fix them if they are in scope or add the minimum prerequisite task in `TODO.md` before the current task and stop.
-7. Mark the completed task with `[DONE]` in `TODO.md` and update its completion record.
-8. Commit all changes for this invocation with a clear task-scoped message and then stop.
+Current task: `M2-01` Anthropic request parsing in `protocol/anthropic/decode.rs`.
 
-Progress:
-- Plan recorded before task execution.
-- First incomplete task identified: `M1-RV` review of M1 IR, OpenAI Chat/DeepSeek parsing, profile rules, and reasoning echo policy.
-- Completed focused design/code review for M1 surfaces; no prerequisite blocker or task split is needed.
-- Next step: run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, then `cargo test --all --all-targets`.
-- Validation passed: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Updated `TODO.md` to mark only `M1-RV` as `[DONE]` with the review completion record.
+1. [DONE] Read the existing IR definitions and OpenAI Chat decoder to match established data shapes, validation style, and tests.
+2. [DONE] Add an Anthropic decoder module that implements `anthropic_request_to_ir(body: &Value) -> Result<IrRequest>`.
+3. [DONE] Cover top-level `system`, message content blocks (`text`, `image`, `tool_use`, `tool_result`, `thinking`), tools, tool choice, max tokens, stream, stop, and provider-specific extras as required by `TODO.md`.
+4. [DONE] Add focused unit tests for string/block-array system prompts, tool use/result mapping, tool choice mapping, and Anthropic thinking signatures.
+5. [DONE] Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. [DONE] Mark `M2-01` `[DONE]` in `TODO.md` and update its completion record.
+7. [DONE] Commit the task changes and stop.

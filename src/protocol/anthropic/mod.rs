@@ -1,3 +1,6 @@
 //! Anthropic Messages API protocol adapter.
 //!
-//! Decoder, encoder, and streaming support are added in later milestones.
+//! Request decoding starts from this milestone; response encoding and streaming
+//! support are added in later milestones.
+
+pub mod decode;

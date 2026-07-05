@@ -234,12 +234,19 @@ echo_policy 在有/无 tool_calls 场景符合 §4.1。用 `insta` 做快照。
 
 ## M2 — 链 3：Chat/DeepSeek → Anthropic（服务 Claude Code）✅ 可用里程碑①
 
-### M2-01 `[TODO]` Anthropic 请求解析 (`protocol/anthropic/decode.rs`)
+### [DONE] M2-01 Anthropic 请求解析 (`protocol/anthropic/decode.rs`)
 实现 `anthropic_request_to_ir(body:&Value) -> Result<IrRequest>`（解析 Claude Code 发来的请求）：
 - 顶层 `system`（string 或 block 数组）→ `IrRequest.system`
 - `messages[].content` 的 block（`text`/`image`/`tool_use`/`tool_result`/`thinking`）→ IR ContentBlock
 - `tools`（`input_schema`）、`tool_choice`（`auto/any/tool` → IR `Auto/Required/Tool`）、`max_tokens`
 - `thinking` block（带 signature）→ `Thinking{source:Anthropic, opaque:signature, echo_policy:Always}`
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/anthropic/decode.rs` 并在 `protocol::anthropic` 暴露 decoder。
+- 已实现 `anthropic_request_to_ir`：解析顶层 `system` 字符串/内容块数组、`messages` 中 `text`/`image`/`tool_use`/`tool_result`/`thinking` 内容块、`tools.input_schema`、`tool_choice` 的 `auto`/`none`/`any`/`tool`、`max_tokens`、采样参数、`stop_sequences`、`stream` 与 provider `extra`。
+- Anthropic `thinking` block 会保存可读 thinking 文本，并把原始 `signature` 字符串字节放入 `Thinking.opaque`，设置 `source=Anthropic`、`echo_policy=Always`。
+- 新增单元测试覆盖块数组系统提示、文本系统提示、工具定义/选择、tool_use/tool_result、Anthropic thinking signature 保真，以及未知内容块拒绝。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-02 `[TODO]` Anthropic 非流式响应编码 (`protocol/anthropic/encode.rs`)
 实现 `ir_response_to_anthropic(resp:&IrResponse) -> Value`：
