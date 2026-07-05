@@ -84,9 +84,15 @@ src/stream/{mod.rs}
 - 新增单元测试覆盖请求体转发、响应字节无损、`content-type` 透传，以及缺少上游 URL 时的配置错误响应。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
-### M0-RV `[TODO]` 【Review】M0 骨架
+### [DONE] M0-RV 【Review】M0 骨架
 确认：`cargo build` + `cargo clippy` 无 error；`/health` 可访问；passthrough 能流式转发一个真实
 SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN.md 一致。记录偏差。
+
+完成记录：
+- 2026-07-06：已复核 M0 依赖、目录骨架、统一错误类型、Axum 服务入口、`/health` 与临时 `POST /passthrough` 路由；当前 `src/` 结构与 PLAN.md 的 M0 骨架要求一致。
+- 已用本地 chunked SSE 上游 + `curl` 验证运行中的 `/health` 与 passthrough：`/health` 返回 `{"status":"ok"}`，passthrough 保留 `text/event-stream` 且 SSE 响应字节与上游输出一致。
+- 偏差记录：M0 骨架未发现与 PLAN.md/TODO.md 要求不一致的偏差。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet`、live `curl` `/health` 与 SSE passthrough 字节对比均通过。
 
 ---
 

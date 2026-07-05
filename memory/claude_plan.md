@@ -4,7 +4,7 @@ This file records the actionable plan, decisions, and progress for the current i
 
 ## Current objective
 
-Complete exactly `M0-05 [TODO] 实现流式透传路由（passthrough）`, then stop after updating task records and committing the result.
+Complete exactly `M0-RV [TODO] 【Review】M0 骨架`, then stop after updating task records and committing the result.
 
 ## Step-by-step plan
 
@@ -26,3 +26,7 @@ Complete exactly `M0-05 [TODO] 实现流式透传路由（passthrough）`, then 
 - 2026-07-06: Implemented `POST /passthrough` with `LLM_PROXY_UPSTREAM_URL`, shared `reqwest::Client`, streaming upstream responses, status preservation, and `content-type` passthrough.
 - 2026-07-06: Added route tests for request body forwarding, response byte preservation, `content-type` passthrough, and missing upstream URL configuration errors.
 - 2026-07-06: Validation passed with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo build --quiet`, and `cargo test --all --all-targets --quiet`; `TODO.md` now marks `M0-05` as done.
+- 2026-07-06: Read `TODO.md`; selected `M0-RV` as the first incomplete task for this invocation.
+- 2026-07-06: Reviewed the M0 source structure and validation criteria; no PLAN/TODO deviations were found for the M0 skeleton.
+- 2026-07-06: Validation passed with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo build --quiet`, `cargo test --all --all-targets --quiet`, and live `curl` checks for `/health` plus streaming SSE passthrough byte preservation.
+- 2026-07-06: Updated `TODO.md` to mark `M0-RV` as done with its completion record.
