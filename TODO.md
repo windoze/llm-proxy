@@ -63,10 +63,15 @@ src/stream/{mod.rs}
 - `src/main.rs` 将 `error` 模块公开，以便当前骨架阶段的共享错误 API 不触发 dead-code warning。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
-### M0-04 `[TODO]` 启动 axum 服务与 /health
+### [DONE] M0-04 启动 axum 服务与 /health
 在 `main.rs`：初始化 `tracing_subscriber`（读 `RUST_LOG`），构建 `axum::Router`，
 监听地址从环境变量 `LLM_PROXY_ADDR`（默认 `127.0.0.1:8080`）读取。
 加 `GET /health` 返回 `200 {"status":"ok"}`。用 `tower_http::trace::TraceLayer` 记录请求。
+
+完成记录：
+- 2026-07-06：已将 `src/main.rs` 改为 Tokio/Axum 服务入口，按 `RUST_LOG` 初始化 tracing，按 `LLM_PROXY_ADDR`（默认 `127.0.0.1:8080`）绑定监听地址。
+- 已构建带 `TraceLayer::new_for_http()` 的 Router，并添加 `GET /health`，返回 `200 {"status":"ok"}`；新增单元测试覆盖该路由响应。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
 ### M0-05 `[TODO]` 实现流式透传路由（passthrough）
 加一条临时路由（如 `POST /passthrough`），用 `reqwest` 向配置的上游 URL 转发请求体，
