@@ -9,7 +9,7 @@ use crate::{
     error::{ProxyError, Result},
     ir::{
         message::{ContentBlock, EchoPolicy, ImageSource, Message, Provider, Role, Thinking},
-        request::{IrRequest, ToolChoice, ToolDef},
+        request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
     protocol::tool_ids::validate_responses_tool_result_pairs,
 };
@@ -69,6 +69,191 @@ pub fn responses_request_to_ir(body: &Value) -> Result<IrRequest> {
     };
     validate_responses_tool_result_pairs(&ir_request)?;
     Ok(ir_request)
+}
+
+/// Converts a non-streaming OpenAI Responses response body into the provider-neutral IR.
+pub fn responses_response_to_ir(body: &Value) -> Result<IrResponse> {
+    let response = body
+        .as_object()
+        .ok_or_else(|| mapping_error("response body must be a JSON object"))?;
+    let content = decode_response_output(response.get("output"))?;
+
+    Ok(IrResponse {
+        id: required_string(response, "id", "response.id")?.to_owned(),
+        model: required_string(response, "model", "response.model")?.to_owned(),
+        stop_reason: decode_response_stop_reason(response, &content)?,
+        usage: decode_response_usage(response.get("usage"))?,
+        content,
+    })
+}
+
+fn decode_response_output(value: Option<&Value>) -> Result<Vec<ContentBlock>> {
+    let output = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| mapping_error("response.output must be an array"))?;
+    let mut content = Vec::new();
+
+    for (index, item) in output.iter().enumerate() {
+        decode_response_output_item(item, index, &mut content)?;
+    }
+
+    Ok(content)
+}
+
+fn decode_response_output_item(
+    value: &Value,
+    index: usize,
+    content: &mut Vec<ContentBlock>,
+) -> Result<()> {
+    let item = value
+        .as_object()
+        .ok_or_else(|| mapping_error(format!("response.output[{index}] must be an object")))?;
+    let path = format!("response.output[{index}]");
+    let item_type = required_string(item, "type", format!("{path}.type"))?;
+
+    match item_type {
+        "message" => decode_response_message_item(item, path, content),
+        "reasoning" => {
+            content.push(decode_response_reasoning_item(item, path)?);
+            Ok(())
+        }
+        "function_call" => {
+            content.push(decode_response_function_call_item(item, path)?);
+            Ok(())
+        }
+        "function_call_output" => {
+            content.push(decode_response_function_call_output_item(item, path)?);
+            Ok(())
+        }
+        other => Err(ProxyError::UnsupportedFeature {
+            feature: format!("output item type `{other}`"),
+            protocol: PROTOCOL.to_owned(),
+        }),
+    }
+}
+
+fn decode_response_message_item(
+    item: &Map<String, Value>,
+    path: String,
+    content: &mut Vec<ContentBlock>,
+) -> Result<()> {
+    let role = required_string(item, "role", format!("{path}.role"))?;
+    if role != "assistant" {
+        return Err(ProxyError::UnsupportedFeature {
+            feature: format!("response message role `{role}`"),
+            protocol: PROTOCOL.to_owned(),
+        });
+    }
+
+    content.extend(decode_required_content(
+        item.get("content"),
+        format!("{path}.content"),
+    )?);
+    Ok(())
+}
+
+fn decode_response_reasoning_item(item: &Map<String, Value>, path: String) -> Result<ContentBlock> {
+    let reasoning_item = normalize_reasoning_item(item, &path)?;
+    let encrypted_content =
+        encrypted_content(&reasoning_item, format!("{path}.encrypted_content"))?;
+
+    Ok(ContentBlock::Thinking(Thinking {
+        text: decode_reasoning_summary(reasoning_item.get("summary"), format!("{path}.summary"))?,
+        opaque: Some(encrypted_content.as_bytes().to_vec()),
+        source: Provider::Responses,
+        echo_policy: EchoPolicy::Always,
+    }))
+}
+
+fn decode_response_function_call_item(
+    item: &Map<String, Value>,
+    path: String,
+) -> Result<ContentBlock> {
+    let arguments = required_string(item, "arguments", format!("{path}.arguments"))?;
+    let input = serde_json::from_str(arguments)
+        .map_err(|err| mapping_error(format!("{path}.arguments must be valid JSON: {err}")))?;
+
+    Ok(ContentBlock::ToolUse {
+        id: required_string(item, "call_id", format!("{path}.call_id"))?.to_owned(),
+        name: required_string(item, "name", format!("{path}.name"))?.to_owned(),
+        input,
+    })
+}
+
+fn decode_response_function_call_output_item(
+    item: &Map<String, Value>,
+    path: String,
+) -> Result<ContentBlock> {
+    Ok(ContentBlock::ToolResult {
+        tool_use_id: required_string(item, "call_id", format!("{path}.call_id"))?.to_owned(),
+        content: decode_tool_output(item.get("output"), format!("{path}.output"))?,
+        is_error: optional_bool(item, "is_error", format!("{path}.is_error"))?.unwrap_or(false),
+    })
+}
+
+fn decode_response_stop_reason(
+    response: &Map<String, Value>,
+    content: &[ContentBlock],
+) -> Result<StopReason> {
+    let status = required_string(response, "status", "response.status")?;
+    match status {
+        "completed" => {
+            if content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            {
+                Ok(StopReason::ToolUse)
+            } else {
+                Ok(StopReason::EndTurn)
+            }
+        }
+        "incomplete" => decode_incomplete_reason(response.get("incomplete_details")),
+        other => Ok(StopReason::Other(other.to_owned())),
+    }
+}
+
+fn decode_incomplete_reason(value: Option<&Value>) -> Result<StopReason> {
+    let Some(value) = value else {
+        return Ok(StopReason::Other("incomplete".to_owned()));
+    };
+    let Some(details) = value.as_object() else {
+        return Err(mapping_error(
+            "response.incomplete_details must be an object when present",
+        ));
+    };
+    let reason = optional_string(details, "reason", "response.incomplete_details.reason")?
+        .unwrap_or("incomplete");
+
+    Ok(match reason {
+        "max_output_tokens" => StopReason::MaxTokens,
+        "stop_sequence" => StopReason::StopSequence,
+        other => StopReason::Other(other.to_owned()),
+    })
+}
+
+fn decode_response_usage(value: Option<&Value>) -> Result<Usage> {
+    let usage = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| mapping_error("response.usage must be an object"))?;
+    let cache_read = usage
+        .get("input_tokens_details")
+        .and_then(Value::as_object)
+        .map(|details| {
+            optional_u32(
+                details,
+                "cached_tokens",
+                "response.usage.input_tokens_details.cached_tokens",
+            )
+        })
+        .transpose()?
+        .flatten();
+
+    Ok(Usage {
+        input_tokens: required_u32(usage, "input_tokens", "response.usage.input_tokens")?,
+        output_tokens: required_u32(usage, "output_tokens", "response.usage.output_tokens")?,
+        cache_read,
+        cache_write: None,
+    })
 }
 
 fn decode_input(
@@ -542,6 +727,12 @@ fn optional_u32(
     }
 }
 
+fn required_u32(object: &Map<String, Value>, field: &str, path: impl Into<String>) -> Result<u32> {
+    let path = path.into();
+    optional_u32(object, field, path.clone())
+        .and_then(|value| value.ok_or_else(|| mapping_error(format!("{path} is required"))))
+}
+
 fn optional_f32(
     object: &Map<String, Value>,
     field: &str,
@@ -610,6 +801,112 @@ mod tests {
             tool_ids::responses_tool_id_map_from_request,
         },
     };
+
+    #[test]
+    fn decodes_response_reasoning_item_to_ir_thinking() {
+        let body = json!({
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5-codex",
+            "output": [
+                {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{ "type": "summary_text", "text": "Need the weather tool." }],
+                    "encrypted_content": "enc_payload",
+                    "provider_metadata": { "kept_by_backend": true }
+                },
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Calling the weather tool.",
+                        "annotations": []
+                    }]
+                },
+                {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_weather",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Paris\"}"
+                }
+            ],
+            "usage": {
+                "input_tokens": 42,
+                "input_tokens_details": { "cached_tokens": 10 },
+                "output_tokens": 9,
+                "output_tokens_details": { "reasoning_tokens": 4 },
+                "total_tokens": 51
+            }
+        });
+
+        let response = responses_response_to_ir(&body).unwrap();
+
+        assert_eq!(response.id, "resp_1");
+        assert_eq!(response.model, "gpt-5-codex");
+        assert_eq!(response.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            response.usage,
+            Usage {
+                input_tokens: 42,
+                output_tokens: 9,
+                cache_read: Some(10),
+                cache_write: None,
+            }
+        );
+        let ContentBlock::Thinking(thinking) = &response.content[0] else {
+            panic!("expected Responses reasoning output to decode as a thinking block");
+        };
+        assert_eq!(thinking.text, Some("Need the weather tool.".to_owned()));
+        assert_eq!(thinking.opaque, Some(b"enc_payload".to_vec()));
+        assert_eq!(thinking.source, Provider::Responses);
+        assert_eq!(thinking.echo_policy, EchoPolicy::Always);
+        assert_eq!(
+            response.content[1],
+            ContentBlock::Text {
+                text: "Calling the weather tool.".to_owned()
+            }
+        );
+        assert_eq!(
+            response.content[2],
+            ContentBlock::ToolUse {
+                id: "call_weather".to_owned(),
+                name: "lookup_weather".to_owned(),
+                input: json!({ "city": "Paris" }),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_response_reasoning_without_encrypted_content() {
+        let body = json!({
+            "id": "resp_missing_reasoning",
+            "status": "completed",
+            "model": "gpt-5-codex",
+            "output": [{
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": []
+            }],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        });
+
+        let error = responses_response_to_ir(&body).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message == "response.output[0].encrypted_content is required")
+        );
+    }
 
     #[test]
     fn decodes_codex_request_with_reasoning_and_function_calls() {
