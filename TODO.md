@@ -426,10 +426,16 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 新增路由测试覆盖非流式文本响应、流式 tool-use 多轮 ID 连续性与 bearer token fallback。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M3-06 `[TODO]` 抓取 Codex 真实 payload（解阻塞 M4）⚠️
+### [DONE] M3-06 抓取 Codex 真实 payload（解阻塞 M4）⚠️
 搭一个临时的假 Responses 端点（或复用 M0 passthrough + dump），让真实 Codex 打过来，
 dump 完整请求 payload。确认 DESIGN §4.4 未钉死项：Codex 客户端是否校验 reasoning item 的
 `encrypted_content`/`id` 格式或长度（vs 纯透传）。把结论写进 DESIGN.md §7 的"仍未钉死"表。
+
+完成记录：
+- 2026-07-06：已使用隔离的临时 `CODEX_HOME`、占位 `OPENAI_API_KEY`、本地假 Responses 端点与真实 Codex CLI 0.142.5 抓取 `POST /v1/responses` 请求 payload；请求为 `stream=true`、`store=false`，每轮发送完整 `input` 历史，工具列表包含 `exec_command` 等 Codex CLI 工具。
+- 已通过假 Responses SSE 返回包含 synthetic reasoning item + `exec_command` function_call 的响应，驱动 Codex 执行安全命令并发起第二轮请求；第二轮 payload 中包含上一轮 function_call/function_call_output 以及 reasoning item。
+- 实测结论：Codex 客户端不校验 reasoning `encrypted_content` 格式，非 base64 内容可原样进入下一轮请求；响应侧非 `rs_` id 不会被客户端拒绝，但 Codex 下轮请求不回传 reasoning `id`/`status`，只回传 `type:"reasoning"`、`summary` 与 `encrypted_content`。已验证 32 KiB 与 256 KiB 级 `encrypted_content` 原样回传；绝对长度上限仍由 M4 长度保护任务防御性处理。
+- 已将结论写入 `DESIGN.md` §4.4 与 §7；本任务仅修改文档/任务记录，未改编译产物，沿用上一轮绿色 `cargo fmt`/`cargo clippy`/`cargo test` 结果。
 
 ### M3-07 `[TODO]` 链 1 集成测试
 `wiremock` mock DeepSeek，录制的 Codex 请求打到 `/v1/responses`，`insta` 快照比对 Responses SSE 序列。

@@ -134,14 +134,15 @@ struct Thinking {
 
 - **`encrypted_content` 是 provider 私钥加密、不可跨 provider/组织解密**（核对确认，见 §7）。
   因此链 2 里我们**必须自造 envelope**，不能透传真 OpenAI 的格式。
-- Envelope 应**伪装成合法的 reasoning item 结构**：带 `rs_` 风格 id、`type: reasoning`，
-  我们的载荷放进 `encrypted_content`（base64）。**不要随便塞**——Codex/上游会校验此字段
-  （`invalid_encrypted_content` 错误可证）。
+- Envelope 应输出 Responses-compatible reasoning item 结构：带 `type: reasoning`，
+  我们的载荷放进 `encrypted_content`（base64）。真实 Responses 后端/上游会校验此字段
+  （`invalid_encrypted_content` 错误可证），但 Codex 客户端本身只把
+  `encrypted_content` 当不透明字符串搬运（见 §7 实测记录）。
 - Envelope 内含：版本号 + 完整性校验 + 后端来源标记（source provider）。
 - **风险**：不透明字段可能有长度上限（`encrypted_content` 可能很大；Anthropic `signature`
   是否限长未知）。若撑爆，退化为有状态方案（`id → 原始 block` 映射）。🔒
-- **未完全钉死**：Codex **客户端**发回 reasoning item 前是否校验 `encrypted_content`/`id`
-  的格式或长度（vs 纯透传）。建议用假 Responses 端点抓一次 Codex 真实 payload 确认。
+- **Codex 客户端实测**：0.142.5 在下轮请求中不回传 reasoning item 的 `id` / `status`，
+  但会逐字节回传 `encrypted_content`；非 `rs_` id、非 base64 内容、256 KiB 级载荷均未触发客户端校验。
 
 ### 4.5 保真坑 🔒
 
@@ -276,6 +277,10 @@ profile: deepseek
   不依赖 `previous_response_id`。（openai/codex issue #17541，2026-04）
 - 无状态模式（`store=false` 或 ZDR）保留 reasoning：请求带 `include:["reasoning.encrypted_content"]`，
   响应 reasoning item（id `rs_...`）带 `encrypted_content`，下轮原样放回 `input`。（OpenAI reasoning 指南 2026-04-30）
+- 本地假 Responses 端点 + 真实 Codex CLI 0.142.5 实测（2026-07-06）：Codex 客户端不会在发回
+  reasoning item 前校验 `encrypted_content` 格式；非 base64 字符串会原样进入下一轮请求。响应侧非
+  `rs_` id 也不会被客户端拒绝，且下一轮请求不携带 reasoning `id` / `status`，只携带
+  `type:"reasoning"`、`summary` 与 `encrypted_content`。已验证 256 KiB 级 `encrypted_content` 原样回传。
 - **`encrypted_content` 是 provider/组织私钥加密，不可跨 provider 解密**；跨 provider 透传会
   `invalid_encrypted_content`。（issue #17541、liteLLM 事故报告）
 - 已知保真坑：转换 reasoning item 时误删 `encrypted_content` 或保留 `status=null` → 400。
@@ -283,9 +288,8 @@ profile: deepseek
 
 ### 仍未完全钉死
 
-- Codex **客户端**在发回 reasoning item 前是否校验 `encrypted_content`/`id` 的格式/长度（vs 纯透传）——
-  决定我们自造 envelope 的自由度。建议用假 Responses 端点抓真实 payload 确认。
-- 不透明字段（`signature` / `encrypted_content`）的长度上限。
+- 不透明字段（`signature` / `encrypted_content`）的绝对长度上限；Codex 客户端已实测可原样回传
+  256 KiB 级 `encrypted_content`，但上限仍需在 M4 长度保护任务中防御性处理。
 
 ---
 
