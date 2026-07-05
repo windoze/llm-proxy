@@ -405,9 +405,15 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 新增单元测试覆盖 reasoning/text/tool-call lifecycle、SSE wrapper 多帧输出、非连续 block index、错误类型 delta、缺少 terminal delta 的拒绝路径。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M3-04 `[TODO]` Responses tool ID 映射与配对 🔒
+### [DONE] M3-04 Responses tool ID 映射与配对 🔒
 实现 `tool_call_id`(Chat) ↔ Responses `call_id` 映射；`function_call`/`function_call_output` 配对链
 （DESIGN §6.2/§6.3）。确保 Codex 多轮 agent 循环 ID 不断裂。加测试。
+
+完成记录：
+- 2026-07-06：已将共享工具 ID 映射扩展为 Chat ↔ client 协议工具 ID 的无状态双向映射，并新增 Responses `call_id` 专用插入、查询与校验入口。
+- 已在 Responses 请求 decoder 中即时校验 `function_call` / `function_call_output` 配对链，拒绝孤立 output、重复 output、未回答 function_call 等会导致 Codex 多轮 agent 循环 ID 断裂的输入。
+- 新增单元测试覆盖 Responses `call_id` 双向映射、多轮 agent loop ID 连续性、孤立 `function_call_output`、重复 output 与未回答 `function_call`。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M3-05 `[TODO]` 装配链 1 端到端路由
 加 `POST /v1/responses`（Responses 端点）：解析→IR→Chat 请求→调 DeepSeek→编码返回（流式/非流式）。

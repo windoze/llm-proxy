@@ -1,23 +1,12 @@
-# Execution Plan
+## Execution Plan
 
-## Scope
-Work on exactly the first incomplete task listed in `TODO.md`, using `TODO.md` as the authoritative ordering and completion record.
+I will follow the repository task order exactly and complete only the first incomplete task from `TODO.md`.
 
-## Steps
-1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Check the latest commit message for any explicitly unfinished issue directly relevant to that task.
-3. Inspect only the files needed to understand and implement that task.
-4. Implement the task completely, preserving existing behavior outside the requested scope.
-5. Run formatting, linting, and relevant tests in the required order; fix any observed unscheduled failures or add the minimum prerequisite task if a concrete blocker prevents completion.
-6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and filling its completion record.
-7. Update this file at major milestones.
-8. Commit all task-related changes with a descriptive message, including the required co-author trailer.
-9. Stop after completing this single task.
-
-## Progress
-- Created initial execution plan.
-- Identified first incomplete task: `M3-03` (`IR event -> Responses SSE encoding` in `protocol/responses/stream.rs`).
-- Reviewed the existing Anthropic SSE encoder, Responses non-streaming encoder, IR event model, and OpenAI SDK stream event shapes needed for `M3-03`.
-- Added `protocol::responses::stream` with a stateful IR-event to Responses SSE encoder and unit tests for text, reasoning, tool-call argument streaming, and ordering validation.
-- Validation passed after implementation: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked `M3-03` as `[DONE]` in `TODO.md` with its completion record.
+1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`. Completed: first incomplete task is `M3-04` Responses tool ID mapping and pairing.
+2. Check the latest commit message only for unfinished work that is directly relevant to that task. Completed: latest commit is `M3-03`, directly preceding this task and not an unfinished blocker.
+3. Inspect the Responses/OpenAI tool ID handling, especially existing Chat↔Anthropic helpers and Responses request/response encode/decode paths.
+4. Implement Responses `call_id` pairing validation and Chat↔Responses ID mapping for `function_call` / `function_call_output`. Completed.
+5. Add focused tests for Codex multi-turn ID continuity, unknown outputs, duplicates, and cross-protocol mapping. Completed.
+6. Run formatting, linting, and relevant validation in the required order. Completed: baseline and post-change checks passed.
+7. Mark `M3-04` `[DONE]` in `TODO.md` and update its completion record. Completed.
+8. Commit all changes for this invocation with the required co-author trailer, then stop.

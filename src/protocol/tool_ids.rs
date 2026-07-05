@@ -1,9 +1,10 @@
 //! Tool-call ID mapping and pairing checks shared by protocol adapters.
 //!
 //! Chat backends expose tool calls as `tool_call_id`; Anthropic clients see the
-//! same edge as `tool_use_id`. The proxy is stateless, so this module records a
-//! request-local bidirectional map and verifies that every returned tool result
-//! points back to the prior assistant tool call it answers.
+//! same edge as `tool_use_id`, and Responses clients see it as `call_id`. The
+//! proxy is stateless, so this module records a request-local bidirectional map
+//! and verifies that every returned tool result points back to the prior
+//! assistant tool call it answers.
 
 // M2-07 wires this staged helper into the Chat request encoder.
 #![allow(dead_code)]
@@ -18,18 +19,18 @@ use crate::{
     },
 };
 
-/// One lossless edge between a Chat tool-call ID and an Anthropic tool-use ID.
+/// One lossless edge between a Chat tool-call ID and the client-visible tool ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolIdPair {
     pub chat_tool_call_id: String,
-    pub anthropic_tool_use_id: String,
+    pub client_tool_call_id: String,
 }
 
-/// Bidirectional request-local map for Chat and Anthropic tool IDs.
+/// Bidirectional request-local map for Chat and client protocol tool IDs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolIdMap {
-    chat_to_anthropic: HashMap<String, String>,
-    anthropic_to_chat: HashMap<String, String>,
+    chat_to_client: HashMap<String, String>,
+    client_to_chat: HashMap<String, String>,
 }
 
 impl ToolIdMap {
@@ -38,27 +39,27 @@ impl ToolIdMap {
         Self::default()
     }
 
-    /// Records an explicit Chat `tool_call_id` ↔ Anthropic `tool_use_id` mapping.
+    /// Records an explicit Chat `tool_call_id` ↔ client protocol tool ID mapping.
     pub fn insert_pair(
         &mut self,
         chat_tool_call_id: impl Into<String>,
-        anthropic_tool_use_id: impl Into<String>,
+        client_tool_call_id: impl Into<String>,
     ) -> Result<()> {
         let chat_tool_call_id = chat_tool_call_id.into();
-        let anthropic_tool_use_id = anthropic_tool_use_id.into();
+        let client_tool_call_id = client_tool_call_id.into();
         reject_empty_id(&chat_tool_call_id, "chat tool_call_id")?;
-        reject_empty_id(&anthropic_tool_use_id, "Anthropic tool_use_id")?;
-        self.ensure_chat_id_available(&chat_tool_call_id, &anthropic_tool_use_id)?;
-        self.ensure_anthropic_id_available(&anthropic_tool_use_id, &chat_tool_call_id)?;
+        reject_empty_id(&client_tool_call_id, "client tool id")?;
+        self.ensure_chat_id_available(&chat_tool_call_id, &client_tool_call_id)?;
+        self.ensure_client_id_available(&client_tool_call_id, &chat_tool_call_id)?;
 
-        self.chat_to_anthropic
-            .insert(chat_tool_call_id.clone(), anthropic_tool_use_id.clone());
-        self.anthropic_to_chat
-            .insert(anthropic_tool_use_id, chat_tool_call_id);
+        self.chat_to_client
+            .insert(chat_tool_call_id.clone(), client_tool_call_id.clone());
+        self.client_to_chat
+            .insert(client_tool_call_id, chat_tool_call_id);
         Ok(())
     }
 
-    /// Records the stateless identity mapping used for Chat ↔ Anthropic turns.
+    /// Records the stateless identity mapping used for Chat ↔ client-protocol turns.
     pub fn insert_identity(&mut self, id: impl Into<String>) -> Result<()> {
         let id = id.into();
         self.insert_pair(id.clone(), id)
@@ -66,36 +67,41 @@ impl ToolIdMap {
 
     /// Returns the Anthropic `tool_use_id` that should expose a Chat tool call.
     pub fn anthropic_tool_use_id(&self, chat_tool_call_id: &str) -> Result<&str> {
-        self.chat_to_anthropic
-            .get(chat_tool_call_id)
-            .map(String::as_str)
-            .ok_or_else(|| {
-                mapping_error(format!(
-                    "missing Anthropic tool_use_id for Chat tool_call_id `{chat_tool_call_id}`"
-                ))
-            })
+        self.client_tool_id(chat_tool_call_id, "Anthropic tool_use_id")
     }
 
     /// Returns the Chat `tool_call_id` answered by an Anthropic tool result.
     pub fn chat_tool_call_id(&self, anthropic_tool_use_id: &str) -> Result<&str> {
-        self.anthropic_to_chat
-            .get(anthropic_tool_use_id)
-            .map(String::as_str)
-            .ok_or_else(|| {
-                mapping_error(format!(
-                    "missing Chat tool_call_id for Anthropic tool_use_id `{anthropic_tool_use_id}`"
-                ))
-            })
+        self.chat_id_for_client_tool_id(anthropic_tool_use_id, "Anthropic tool_use_id")
+    }
+
+    /// Records an explicit Chat `tool_call_id` ↔ Responses `call_id` mapping.
+    pub fn insert_responses_pair(
+        &mut self,
+        chat_tool_call_id: impl Into<String>,
+        responses_call_id: impl Into<String>,
+    ) -> Result<()> {
+        self.insert_pair(chat_tool_call_id, responses_call_id)
+    }
+
+    /// Returns the Responses `call_id` that should expose a Chat tool call.
+    pub fn responses_call_id(&self, chat_tool_call_id: &str) -> Result<&str> {
+        self.client_tool_id(chat_tool_call_id, "Responses call_id")
+    }
+
+    /// Returns the Chat `tool_call_id` answered by a Responses function output.
+    pub fn chat_tool_call_id_for_responses(&self, responses_call_id: &str) -> Result<&str> {
+        self.chat_id_for_client_tool_id(responses_call_id, "Responses call_id")
     }
 
     /// Returns all known ID pairs in deterministic Chat-ID order.
     pub fn pairs(&self) -> Vec<ToolIdPair> {
         let mut pairs = self
-            .chat_to_anthropic
+            .chat_to_client
             .iter()
-            .map(|(chat_tool_call_id, anthropic_tool_use_id)| ToolIdPair {
+            .map(|(chat_tool_call_id, client_tool_call_id)| ToolIdPair {
                 chat_tool_call_id: chat_tool_call_id.clone(),
-                anthropic_tool_use_id: anthropic_tool_use_id.clone(),
+                client_tool_call_id: client_tool_call_id.clone(),
             })
             .collect::<Vec<_>>();
         pairs.sort_by(|left, right| left.chat_tool_call_id.cmp(&right.chat_tool_call_id));
@@ -104,34 +110,60 @@ impl ToolIdMap {
 
     /// Returns true when no mappings have been recorded.
     pub fn is_empty(&self) -> bool {
-        self.chat_to_anthropic.is_empty()
+        self.chat_to_client.is_empty()
     }
 
     fn contains_chat_tool_call_id(&self, id: &str) -> bool {
-        self.chat_to_anthropic.contains_key(id)
+        self.chat_to_client.contains_key(id)
+    }
+
+    fn client_tool_id(&self, chat_tool_call_id: &str, client_label: &str) -> Result<&str> {
+        self.chat_to_client
+            .get(chat_tool_call_id)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                mapping_error(format!(
+                    "missing {client_label} for Chat tool_call_id `{chat_tool_call_id}`"
+                ))
+            })
+    }
+
+    fn chat_id_for_client_tool_id(
+        &self,
+        client_tool_call_id: &str,
+        client_label: &str,
+    ) -> Result<&str> {
+        self.client_to_chat
+            .get(client_tool_call_id)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                mapping_error(format!(
+                    "missing Chat tool_call_id for {client_label} `{client_tool_call_id}`"
+                ))
+            })
     }
 
     fn ensure_chat_id_available(
         &self,
         chat_tool_call_id: &str,
-        anthropic_tool_use_id: &str,
+        client_tool_call_id: &str,
     ) -> Result<()> {
-        match self.chat_to_anthropic.get(chat_tool_call_id) {
-            Some(existing) if existing != anthropic_tool_use_id => Err(mapping_error(format!(
-                "Chat tool_call_id `{chat_tool_call_id}` is already mapped to Anthropic tool_use_id `{existing}`, not `{anthropic_tool_use_id}`"
+        match self.chat_to_client.get(chat_tool_call_id) {
+            Some(existing) if existing != client_tool_call_id => Err(mapping_error(format!(
+                "Chat tool_call_id `{chat_tool_call_id}` is already mapped to client tool id `{existing}`, not `{client_tool_call_id}`"
             ))),
             _ => Ok(()),
         }
     }
 
-    fn ensure_anthropic_id_available(
+    fn ensure_client_id_available(
         &self,
-        anthropic_tool_use_id: &str,
+        client_tool_call_id: &str,
         chat_tool_call_id: &str,
     ) -> Result<()> {
-        match self.anthropic_to_chat.get(anthropic_tool_use_id) {
+        match self.client_to_chat.get(client_tool_call_id) {
             Some(existing) if existing != chat_tool_call_id => Err(mapping_error(format!(
-                "Anthropic tool_use_id `{anthropic_tool_use_id}` is already mapped to Chat tool_call_id `{existing}`, not `{chat_tool_call_id}`"
+                "client tool id `{client_tool_call_id}` is already mapped to Chat tool_call_id `{existing}`, not `{chat_tool_call_id}`"
             ))),
             _ => Ok(()),
         }
@@ -140,7 +172,19 @@ impl ToolIdMap {
 
 /// Builds and validates the complete tool ID map implied by an IR request history.
 pub fn tool_id_map_from_request(request: &IrRequest) -> Result<ToolIdMap> {
-    let mut tracker = ToolPairingTracker::default();
+    tool_id_map_from_request_with_label(request, "client tool id")
+}
+
+/// Builds and validates the Chat ↔ Responses `call_id` map implied by an IR request history.
+pub fn responses_tool_id_map_from_request(request: &IrRequest) -> Result<ToolIdMap> {
+    tool_id_map_from_request_with_label(request, "Responses call_id")
+}
+
+fn tool_id_map_from_request_with_label(
+    request: &IrRequest,
+    client_id_label: &'static str,
+) -> Result<ToolIdMap> {
+    let mut tracker = ToolPairingTracker::new(client_id_label);
     for (message_index, message) in request.messages.iter().enumerate() {
         tracker.record_message(message, message_index)?;
     }
@@ -152,14 +196,35 @@ pub fn validate_tool_result_pairs(request: &IrRequest) -> Result<()> {
     tool_id_map_from_request(request).map(|_| ())
 }
 
-#[derive(Debug, Default)]
+/// Verifies every Responses `function_call_output.call_id` answers a prior `function_call.call_id`.
+pub fn validate_responses_tool_result_pairs(request: &IrRequest) -> Result<()> {
+    responses_tool_id_map_from_request(request).map(|_| ())
+}
+
+#[derive(Debug)]
 struct ToolPairingTracker {
     ids: ToolIdMap,
     unresolved_chat_ids: HashSet<String>,
     resolved_chat_ids: HashSet<String>,
+    client_id_label: &'static str,
+}
+
+impl Default for ToolPairingTracker {
+    fn default() -> Self {
+        Self::new("client tool id")
+    }
 }
 
 impl ToolPairingTracker {
+    fn new(client_id_label: &'static str) -> Self {
+        Self {
+            ids: ToolIdMap::new(),
+            unresolved_chat_ids: HashSet::new(),
+            resolved_chat_ids: HashSet::new(),
+            client_id_label,
+        }
+    }
+
     fn record_message(&mut self, message: &Message, message_index: usize) -> Result<()> {
         for (block_index, block) in message.content.iter().enumerate() {
             let path = format!("messages[{message_index}].content[{block_index}]");
@@ -201,7 +266,10 @@ impl ToolPairingTracker {
     }
 
     fn record_tool_result(&mut self, tool_use_id: &str, path: &str) -> Result<()> {
-        let chat_tool_call_id = self.ids.chat_tool_call_id(tool_use_id)?.to_owned();
+        let chat_tool_call_id = self
+            .ids
+            .chat_id_for_client_tool_id(tool_use_id, self.client_id_label)?
+            .to_owned();
 
         if !self.unresolved_chat_ids.remove(&chat_tool_call_id) {
             if self.resolved_chat_ids.contains(&chat_tool_call_id) {
@@ -269,7 +337,28 @@ mod tests {
             ids.pairs(),
             vec![ToolIdPair {
                 chat_tool_call_id: "call_chat".to_owned(),
-                anthropic_tool_use_id: "toolu_anthropic".to_owned(),
+                client_tool_call_id: "toolu_anthropic".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn maps_responses_call_ids_in_both_directions() {
+        let mut ids = ToolIdMap::new();
+
+        ids.insert_responses_pair("chat_call_1", "resp_call_1")
+            .unwrap();
+
+        assert_eq!(ids.responses_call_id("chat_call_1").unwrap(), "resp_call_1");
+        assert_eq!(
+            ids.chat_tool_call_id_for_responses("resp_call_1").unwrap(),
+            "chat_call_1"
+        );
+        assert_eq!(
+            ids.pairs(),
+            vec![ToolIdPair {
+                chat_tool_call_id: "chat_call_1".to_owned(),
+                client_tool_call_id: "resp_call_1".to_owned(),
             }]
         );
     }
@@ -306,15 +395,15 @@ mod tests {
             vec![
                 ToolIdPair {
                     chat_tool_call_id: "call_news".to_owned(),
-                    anthropic_tool_use_id: "call_news".to_owned(),
+                    client_tool_call_id: "call_news".to_owned(),
                 },
                 ToolIdPair {
                     chat_tool_call_id: "call_time".to_owned(),
-                    anthropic_tool_use_id: "call_time".to_owned(),
+                    client_tool_call_id: "call_time".to_owned(),
                 },
                 ToolIdPair {
                     chat_tool_call_id: "call_weather".to_owned(),
-                    anthropic_tool_use_id: "call_weather".to_owned(),
+                    client_tool_call_id: "call_weather".to_owned(),
                 },
             ]
         );

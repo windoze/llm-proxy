@@ -11,6 +11,7 @@ use crate::{
         message::{ContentBlock, EchoPolicy, ImageSource, Message, Provider, Role, Thinking},
         request::{IrRequest, ToolChoice, ToolDef},
     },
+    protocol::tool_ids::validate_responses_tool_result_pairs,
 };
 
 const PROTOCOL: &str = "responses";
@@ -48,7 +49,7 @@ pub fn responses_request_to_ir(body: &Value) -> Result<IrRequest> {
 
     let messages = decode_input(request.get("input"), &mut system_blocks)?;
 
-    Ok(IrRequest {
+    let ir_request = IrRequest {
         model: required_string(request, "model", "request.model")?.to_owned(),
         system: (!system_blocks.is_empty()).then_some(system_blocks),
         messages,
@@ -61,7 +62,9 @@ pub fn responses_request_to_ir(body: &Value) -> Result<IrRequest> {
         stop: decode_stop(request.get("stop"))?,
         stream: optional_bool(request, "stream", "request.stream")?.unwrap_or(false),
         extra: collect_extra(request),
-    })
+    };
+    validate_responses_tool_result_pairs(&ir_request)?;
+    Ok(ir_request)
 }
 
 fn decode_input(
@@ -510,6 +513,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::protocol::tool_ids::responses_tool_id_map_from_request;
 
     #[test]
     fn decodes_codex_request_with_reasoning_and_function_calls() {
@@ -745,6 +749,56 @@ mod tests {
     }
 
     #[test]
+    fn validates_responses_call_ids_across_multi_turn_agent_loop() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": [
+                { "type": "message", "role": "user", "content": "check weather and time" },
+                {
+                    "type": "function_call",
+                    "call_id": "call_weather",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Paris\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_weather",
+                    "output": "sunny"
+                },
+                { "type": "message", "role": "assistant", "content": "Weather is sunny." },
+                {
+                    "type": "function_call",
+                    "call_id": "call_time",
+                    "name": "lookup_time",
+                    "arguments": "{\"city\":\"Paris\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_time",
+                    "output": "10:30"
+                }
+            ]
+        });
+
+        let request = responses_request_to_ir(&body).unwrap();
+        let ids = responses_tool_id_map_from_request(&request).unwrap();
+
+        assert_eq!(
+            ids.responses_call_id("call_weather").unwrap(),
+            "call_weather"
+        );
+        assert_eq!(ids.responses_call_id("call_time").unwrap(), "call_time");
+        assert_eq!(
+            ids.chat_tool_call_id_for_responses("call_weather").unwrap(),
+            "call_weather"
+        );
+        assert_eq!(
+            ids.chat_tool_call_id_for_responses("call_time").unwrap(),
+            "call_time"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_function_arguments_json() {
         let body = json!({
             "model": "gpt-5-codex",
@@ -760,6 +814,74 @@ mod tests {
 
         assert!(
             matches!(error, ProxyError::ProtocolMapping(message) if message.contains("arguments must be valid JSON"))
+        );
+    }
+
+    #[test]
+    fn rejects_function_call_output_without_prior_function_call() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "missing_call",
+                "output": "orphaned"
+            }]
+        });
+
+        let error = responses_request_to_ir(&body).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message.contains("missing Chat tool_call_id for Responses call_id `missing_call`"))
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_function_call_outputs() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_weather",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Paris\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_weather",
+                    "output": "sunny"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_weather",
+                    "output": "still sunny"
+                }
+            ]
+        });
+
+        let error = responses_request_to_ir(&body).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message.contains("duplicates the result"))
+        );
+    }
+
+    #[test]
+    fn rejects_unanswered_function_call_items() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": [{
+                "type": "function_call",
+                "call_id": "call_weather",
+                "name": "lookup_weather",
+                "arguments": "{\"city\":\"Paris\"}"
+            }]
+        });
+
+        let error = responses_request_to_ir(&body).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message.contains("assistant tool call `call_weather` has no matching tool result"))
         );
     }
 
