@@ -50,12 +50,18 @@ src/stream/{mod.rs}
 - 2026-07-06：已按 PLAN.md/M0-02 创建 `src/config.rs`、`src/error.rs`、`src/ir/*`、`src/protocol/*`、`src/provider/mod.rs`、`src/stream/mod.rs` 模块骨架，并在 `src/main.rs` 声明顶层模块。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
-### M0-03 `[TODO]` 定义统一错误类型
+### [DONE] M0-03 定义统一错误类型
 在 `src/error.rs` 定义 `ProxyError`（`thiserror`），至少涵盖：
 `UpstreamHttp`(reqwest error)、`Deserialize`(serde)、`UnsupportedFeature{feature,protocol}`、
 `ProtocolMapping(String)`、`Config(String)`、`Upstream4xx{status,body}`。
 实现 `axum::response::IntoResponse`，把错误映射为合理的 HTTP 状态码 + JSON body（结构 M7 再细化，此处给最简版）。
 定义 `type Result<T> = std::result::Result<T, ProxyError>;`。
+
+完成记录：
+- 2026-07-06：已在 `src/error.rs` 定义统一 `ProxyError` 与 `Result<T>` 别名，覆盖上游 HTTP、JSON 解析、不支持特性、协议映射、配置错误与上游 4xx 响应。
+- 已实现 `axum::response::IntoResponse`，返回合理 HTTP 状态码与最简 JSON error body；新增单元测试覆盖配置错误响应体与上游 4xx 状态透传。
+- `src/main.rs` 将 `error` 模块公开，以便当前骨架阶段的共享错误 API 不触发 dead-code warning。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo build --quiet`、`cargo test --all --all-targets --quiet` 均通过。
 
 ### M0-04 `[TODO]` 启动 axum 服务与 /health
 在 `main.rs`：初始化 `tracing_subscriber`（读 `RUST_LOG`），构建 `axum::Router`，
