@@ -13,8 +13,10 @@ use crate::{
     error::{ProxyError, Result},
     ir::{
         event::{BlockKind, IrEvent},
+        message::Provider,
         request::{StopReason, Usage},
     },
+    reasoning::envelope::{SourceBlock, wrap_as_signature},
 };
 
 const PROTOCOL: &str = "anthropic";
@@ -52,6 +54,8 @@ pub struct AnthropicStreamEncoder {
     message_stopped: bool,
     next_block_index: usize,
     open_blocks: BTreeSet<usize>,
+    thinking_blocks: BTreeSet<usize>,
+    thinking_metadata_blocks: BTreeSet<usize>,
     emitted_stop_reason: bool,
 }
 
@@ -82,6 +86,11 @@ impl AnthropicStreamEncoder {
                     "thinking": text,
                 }),
             )?,
+            IrEvent::ThinkingMetadata {
+                index,
+                source,
+                opaque,
+            } => self.encode_thinking_metadata(*index, source, opaque)?,
             IrEvent::ToolUseDelta {
                 index,
                 partial_json,
@@ -149,6 +158,9 @@ impl AnthropicStreamEncoder {
 
         self.next_block_index += 1;
         self.open_blocks.insert(index);
+        if matches!(block, BlockKind::Thinking) {
+            self.thinking_blocks.insert(index);
+        }
         Ok((
             CONTENT_BLOCK_START,
             json!({
@@ -157,6 +169,34 @@ impl AnthropicStreamEncoder {
                 "content_block": encode_content_block_start(block),
             }),
         ))
+    }
+
+    fn encode_thinking_metadata(
+        &mut self,
+        index: usize,
+        source: &Provider,
+        opaque: &[u8],
+    ) -> Result<(&'static str, Value)> {
+        self.ensure_message_started("content_block_delta")?;
+        self.ensure_block_open(index, "content_block_delta")?;
+        if !self.thinking_blocks.contains(&index) {
+            return Err(mapping_error(format!(
+                "thinking metadata received for non-thinking block index {index}"
+            )));
+        }
+        if !self.thinking_metadata_blocks.insert(index) {
+            return Err(mapping_error(format!(
+                "thinking metadata received more than once for index {index}"
+            )));
+        }
+
+        self.encode_delta(
+            index,
+            json!({
+                "type": "signature_delta",
+                "signature": encode_thinking_signature(source, opaque)?,
+            }),
+        )
     }
 
     fn encode_delta(&self, index: usize, delta: Value) -> Result<(&'static str, Value)> {
@@ -180,6 +220,8 @@ impl AnthropicStreamEncoder {
                 "content_block_stop received for unopened index {index}"
             )));
         }
+        self.thinking_blocks.remove(&index);
+        self.thinking_metadata_blocks.remove(&index);
 
         Ok((
             CONTENT_BLOCK_STOP,
@@ -323,6 +365,22 @@ fn encode_streaming_usage(usage: &Usage) -> Value {
     }
 
     Value::Object(value)
+}
+
+fn encode_thinking_signature(source: &Provider, opaque: &[u8]) -> Result<String> {
+    match source {
+        Provider::Responses => wrap_as_signature(&SourceBlock::new(Provider::Responses, opaque)),
+        Provider::Anthropic => std::str::from_utf8(opaque)
+            .map(str::to_owned)
+            .map_err(|err| {
+                mapping_error(format!(
+                    "Anthropic thinking signature metadata must be valid UTF-8: {err}"
+                ))
+            }),
+        other => Err(mapping_error(format!(
+            "thinking metadata from source {other:?} cannot be encoded as an Anthropic signature"
+        ))),
+    }
 }
 
 fn format_sse_frame(event_type: &str, data: &Value) -> Result<Bytes> {
@@ -525,6 +583,44 @@ mod tests {
             })
         );
         assert_eq!(encoded[11].1, json!({ "type": "message_stop" }));
+    }
+
+    #[test]
+    fn encodes_responses_thinking_metadata_as_signature_delta() {
+        let events = vec![
+            IrEvent::MessageStart {
+                id: "msg_reasoning".to_owned(),
+                model: "claude-sonnet-4-5".to_owned(),
+            },
+            IrEvent::BlockStart {
+                index: 0,
+                block: BlockKind::Thinking,
+            },
+            IrEvent::ThinkingDelta {
+                index: 0,
+                text: "Need hidden state.".to_owned(),
+            },
+            IrEvent::ThinkingMetadata {
+                index: 0,
+                source: Provider::Responses,
+                opaque: b"enc_payload".to_vec(),
+            },
+            IrEvent::BlockStop { index: 0 },
+            IrEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+            },
+            IrEvent::MessageStop,
+        ];
+
+        let encoded = encode_events(&events).unwrap();
+        assert_eq!(encoded[3].0, CONTENT_BLOCK_DELTA);
+        assert_eq!(encoded[3].1["delta"]["type"], "signature_delta");
+
+        let signature = encoded[3].1["delta"]["signature"].as_str().unwrap();
+        let source_block = crate::reasoning::envelope::unwrap_from_signature(signature).unwrap();
+        assert_eq!(source_block.source, Provider::Responses);
+        assert_eq!(source_block.payload, b"enc_payload".to_vec());
     }
 
     #[tokio::test]

@@ -16,8 +16,10 @@ use crate::{
     error::{ProxyError, Result},
     ir::{
         event::{BlockKind, IrEvent},
+        message::Provider,
         request::{StopReason, Usage},
     },
+    reasoning::envelope::{SourceBlock, wrap},
 };
 
 use super::encode::{encode_incomplete_details, encode_status, encode_usage, item_id};
@@ -97,6 +99,7 @@ struct ReasoningBlockState {
     output_index: usize,
     item_id: String,
     text: String,
+    encrypted_content: Option<String>,
 }
 
 #[derive(Debug)]
@@ -123,6 +126,11 @@ impl ResponsesStreamEncoder {
             IrEvent::BlockStart { index, block } => self.encode_block_start(*index, block)?,
             IrEvent::TextDelta { index, text } => self.encode_text_delta(*index, text)?,
             IrEvent::ThinkingDelta { index, text } => self.encode_reasoning_delta(*index, text)?,
+            IrEvent::ThinkingMetadata {
+                index,
+                source,
+                opaque,
+            } => self.encode_reasoning_metadata(*index, source, opaque)?,
             IrEvent::ToolUseDelta {
                 index,
                 partial_json,
@@ -220,10 +228,11 @@ impl ResponsesStreamEncoder {
                     output_index,
                     item_id: item_id.clone(),
                     text: String::new(),
+                    encrypted_content: None,
                 });
                 (
                     state,
-                    encode_reasoning_item(&item_id, "in_progress", None),
+                    encode_reasoning_item(&item_id, "in_progress", None, None),
                     Some((
                         RESPONSE_CONTENT_PART_ADDED,
                         json!({
@@ -316,6 +325,27 @@ impl ResponsesStreamEncoder {
         )])
     }
 
+    fn encode_reasoning_metadata(
+        &mut self,
+        index: usize,
+        source: &Provider,
+        opaque: &[u8],
+    ) -> Result<Vec<(&'static str, Value)>> {
+        let encrypted_content = encode_reasoning_encrypted_content(source, opaque)?;
+        let state = self.reasoning_block_mut(index, "thinking_metadata")?;
+
+        match &state.encrypted_content {
+            Some(existing) if existing != &encrypted_content => Err(mapping_error(format!(
+                "thinking metadata changed for reasoning block index {index}"
+            ))),
+            Some(_) => Ok(Vec::new()),
+            None => {
+                state.encrypted_content = Some(encrypted_content);
+                Ok(Vec::new())
+            }
+        }
+    }
+
     fn encode_tool_use_delta(
         &mut self,
         index: usize,
@@ -390,7 +420,12 @@ impl ResponsesStreamEncoder {
         &mut self,
         state: ReasoningBlockState,
     ) -> Result<Vec<(&'static str, Value)>> {
-        let completed_item = encode_reasoning_item(&state.item_id, "completed", Some(&state.text));
+        let completed_item = encode_reasoning_item(
+            &state.item_id,
+            "completed",
+            Some(&state.text),
+            state.encrypted_content.as_deref(),
+        );
         self.remember_completed_item(state.output_index, completed_item.clone())?;
 
         Ok(vec![
@@ -653,18 +688,34 @@ fn encode_output_text_part(text: &str) -> Value {
     })
 }
 
-fn encode_reasoning_item(item_id: &str, status: &str, text: Option<&str>) -> Value {
+fn encode_reasoning_item(
+    item_id: &str,
+    status: &str,
+    text: Option<&str>,
+    encrypted_content: Option<&str>,
+) -> Value {
     let content = text
         .map(|text| Value::Array(vec![encode_reasoning_text_part(text)]))
         .unwrap_or_else(|| Value::Array(Vec::new()));
 
-    json!({
+    let mut item = json!({
         "id": item_id,
         "type": "reasoning",
         "status": status,
         "summary": [],
         "content": content,
-    })
+    });
+
+    if let Some(encrypted_content) = encrypted_content {
+        item.as_object_mut()
+            .expect("reasoning item must be an object")
+            .insert(
+                "encrypted_content".to_owned(),
+                Value::String(encrypted_content.to_owned()),
+            );
+    }
+
+    item
 }
 
 fn encode_reasoning_text_part(text: &str) -> Value {
@@ -689,6 +740,22 @@ fn encode_tool_use_item(
         "name": name,
         "arguments": arguments,
     })
+}
+
+fn encode_reasoning_encrypted_content(source: &Provider, opaque: &[u8]) -> Result<String> {
+    match source {
+        Provider::Responses => std::str::from_utf8(opaque)
+            .map(str::to_owned)
+            .map_err(|err| {
+                mapping_error(format!(
+                    "Responses reasoning encrypted_content metadata must be valid UTF-8: {err}"
+                ))
+            }),
+        Provider::Anthropic => wrap(&SourceBlock::new(Provider::Anthropic, opaque)),
+        other => Err(mapping_error(format!(
+            "thinking metadata from source {other:?} cannot be encoded as Responses encrypted_content"
+        ))),
+    }
 }
 
 fn unix_timestamp() -> u64 {
@@ -909,6 +976,43 @@ mod tests {
         assert_eq!(completed["output"][0]["content"][0]["text"], "Think first.");
         assert_eq!(completed["output"][1]["content"][0]["text"], "Answer.");
         assert_eq!(completed["output"][2]["arguments"], "{\"city\":\"Paris\"}");
+    }
+
+    #[test]
+    fn encodes_thinking_metadata_as_reasoning_encrypted_content() {
+        let events = vec![
+            IrEvent::MessageStart {
+                id: "resp_reasoning".to_owned(),
+                model: "gpt-5.1".to_owned(),
+            },
+            IrEvent::BlockStart {
+                index: 0,
+                block: BlockKind::Thinking,
+            },
+            IrEvent::ThinkingDelta {
+                index: 0,
+                text: "Think.".to_owned(),
+            },
+            IrEvent::ThinkingMetadata {
+                index: 0,
+                source: Provider::Responses,
+                opaque: b"enc_stream".to_vec(),
+            },
+            IrEvent::BlockStop { index: 0 },
+            IrEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+            },
+            IrEvent::MessageStop,
+        ];
+
+        let encoded = encode_events(&events).unwrap();
+        let item_done = encoded
+            .iter()
+            .find(|(event_type, _)| event_type == RESPONSE_OUTPUT_ITEM_DONE)
+            .unwrap();
+
+        assert_eq!(item_done.1["item"]["encrypted_content"], "enc_stream");
     }
 
     #[tokio::test]

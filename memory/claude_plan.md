@@ -14,21 +14,21 @@ I will follow `TODO.md` as the authoritative task list and complete exactly the 
 
 ## Current Invocation
 
-Selected task: `M5-04` — reverse-restore Claude Code-returned Anthropic `thinking.signature` values into Responses reasoning items for the backend request `input`.
+Selected task: `M5-05` — implement rich-to-rich streaming conversion from Responses SSE through IR events to Anthropic SSE.
 
 Task-specific steps:
 
-1. Inspect the existing Anthropic request decoder, Responses encoder helpers, and reasoning envelope APIs.
-2. Teach Anthropic thinking decode to recognize gateway-owned signatures, unwrap them, and convert Responses-source envelopes back into `Thinking { source: Responses, opaque: original_payload }`.
-3. Add or extend Responses request encoding so IR messages containing Responses-origin thinking emit `type:"reasoning"` input items with restored `encrypted_content`/preserved item fields.
-4. Add focused unit tests covering signature unwrap, restored Responses request input, and invalid/wrong-source signature rejection.
+1. Inspect the existing Responses non-streaming decoder, Anthropic SSE encoder, stream modules, and any prior Chat SSE decoder patterns.
+2. Add `stream/responses_decoder.rs` to convert Responses SSE events into provider-neutral `IrEvent`s while preserving block indexes and reasoning/tool-call structure.
+3. Reuse or extend the existing Anthropic SSE encoder so the decoded IR event stream emits valid Anthropic SSE events.
+4. Add focused unit tests for Responses text/reasoning/function-call streaming, index/type alignment, and end-to-end Responses SSE → IR event → Anthropic SSE behavior.
 5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. Mark `M5-04` as `[DONE]` in `TODO.md`, update this file with completion status, and commit the task changes.
+6. Mark `M5-05` as `[DONE]` in `TODO.md`, update this file with completion status, and commit the task changes.
 
 ## Progress Update
 
-Implemented M5-04. Anthropic request decoding now recognizes gateway-owned thinking signatures, unwraps Responses-source envelopes into Responses-origin IR thinking blocks, and rejects wrapped signatures carrying any other source. Responses request encoding now emits restored `reasoning` input items from Responses-origin thinking, preserving full reasoning item JSON when available or rebuilding a minimal item with the restored `encrypted_content` otherwise. Added focused unit coverage for signature unwrap/rejection and Responses request input restoration. Formatting, clippy, and the full test suite pass.
+Implemented M5-05. Added `stream::responses_decoder` for Responses SSE → IR event decoding with strict `output_index` alignment, text/reasoning/function-call lifecycle handling, usage/status decoding, and encrypted-content recovery from `output_item.done` or terminal `response.output`. Extended streaming IR with `ThinkingMetadata{source,opaque}` so rich reasoning metadata is not lost, and taught Anthropic SSE encoding to emit Responses-origin metadata as a wrapped `signature_delta`. Added coverage for direct decoding, terminal encrypted-content fallback, missing encrypted-content rejection, Responses SSE → IR → Anthropic SSE signature deltas, and Responses stream encoder metadata preservation.
 
 ## Completion Update
 
-`M5-04` is marked `[DONE]` in `TODO.md` with implementation notes and validation results. No phase-level `PLAN.md` update was needed.
+`M5-05` is marked `[DONE]` in `TODO.md` with implementation notes and validation results. No phase-level `PLAN.md` update was needed.

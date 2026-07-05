@@ -5,7 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::request::{StopReason, Usage};
+use super::{
+    message::Provider,
+    request::{StopReason, Usage},
+};
 
 /// Provider-neutral streaming event emitted by decoders and consumed by encoders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +29,11 @@ pub enum IrEvent {
     ThinkingDelta {
         index: usize,
         text: String,
+    },
+    ThinkingMetadata {
+        index: usize,
+        source: Provider,
+        opaque: Vec<u8>,
     },
     ToolUseDelta {
         index: usize,
@@ -105,6 +113,29 @@ mod tests {
                         "cache_read": 3,
                         "cache_write": null
                     }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn thinking_metadata_preserves_source_and_opaque_bytes() {
+        let event = IrEvent::ThinkingMetadata {
+            index: 0,
+            source: Provider::Responses,
+            opaque: b"encrypted_content".to_vec(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "thinking_metadata": {
+                    "index": 0,
+                    "source": "responses",
+                    "opaque": [
+                        101, 110, 99, 114, 121, 112, 116, 101, 100, 95,
+                        99, 111, 110, 116, 101, 110, 116
+                    ]
                 }
             })
         );
