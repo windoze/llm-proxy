@@ -233,7 +233,7 @@ async fn chat_json_to_responses_response(
 ) -> error::Result<Response> {
     let chat_response = upstream_response.json::<Value>().await?;
     let ir_response = chat_response_to_ir(&chat_response)?;
-    Ok(Json(ir_response_to_responses(&ir_response)).into_response())
+    Ok(Json(ir_response_to_responses(&ir_response)?).into_response())
 }
 
 async fn chat_stream_to_anthropic_response(

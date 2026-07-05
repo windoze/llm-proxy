@@ -4,4 +4,5 @@
 
 pub mod decode;
 pub mod encode;
+mod reasoning;
 pub mod stream;

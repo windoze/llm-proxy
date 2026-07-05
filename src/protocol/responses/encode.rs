@@ -7,16 +7,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
-use crate::ir::{
-    message::{ContentBlock, Thinking},
-    request::{IrResponse, StopReason, Usage},
+use crate::{
+    error::{ProxyError, Result},
+    ir::{
+        message::{ContentBlock, Thinking},
+        request::{IrResponse, StopReason, Usage},
+    },
 };
 
-/// Converts a provider-neutral non-streaming response into a Responses object.
-pub fn ir_response_to_responses(resp: &IrResponse) -> Value {
-    let status = encode_status(&resp.stop_reason);
+use super::reasoning::preserved_reasoning_item_from_thinking;
 
-    json!({
+/// Converts a provider-neutral non-streaming response into a Responses object.
+pub fn ir_response_to_responses(resp: &IrResponse) -> Result<Value> {
+    let status = encode_status(&resp.stop_reason);
+    let output = encode_output(&resp.id, &resp.content, status)?;
+
+    Ok(json!({
         "id": resp.id,
         "object": "response",
         "created_at": unix_timestamp(),
@@ -24,12 +30,12 @@ pub fn ir_response_to_responses(resp: &IrResponse) -> Value {
         "error": null,
         "incomplete_details": encode_incomplete_details(&resp.stop_reason),
         "model": resp.model,
-        "output": encode_output(&resp.id, &resp.content, status),
+        "output": output,
         "parallel_tool_calls": true,
         "previous_response_id": null,
         "store": false,
         "usage": encode_usage(&resp.usage),
-    })
+    }))
 }
 
 fn unix_timestamp() -> u64 {
@@ -39,7 +45,7 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-fn encode_output(response_id: &str, content: &[ContentBlock], status: &str) -> Value {
+fn encode_output(response_id: &str, content: &[ContentBlock], status: &str) -> Result<Value> {
     let mut output = Vec::new();
     let mut pending_text = Vec::new();
 
@@ -57,18 +63,18 @@ fn encode_output(response_id: &str, content: &[ContentBlock], status: &str) -> V
                     output.len(),
                     thinking,
                     status,
-                ));
+                )?);
             }
             ContentBlock::ToolUse { id, name, input } => {
                 flush_message_item(response_id, status, &mut pending_text, &mut output);
+                let arguments = serde_json::to_string(input)?;
                 output.push(json!({
                     "id": item_id("fc", response_id, output.len()),
                     "type": "function_call",
                     "status": status,
                     "call_id": id,
                     "name": name,
-                    "arguments": serde_json::to_string(input)
-                        .expect("serde_json::Value must serialize to JSON"),
+                    "arguments": arguments,
                 }));
             }
             ContentBlock::ToolResult {
@@ -77,21 +83,24 @@ fn encode_output(response_id: &str, content: &[ContentBlock], status: &str) -> V
                 is_error,
             } => {
                 flush_message_item(response_id, status, &mut pending_text, &mut output);
+                let tool_output = encode_tool_output(content)?;
                 output.push(json!({
                     "type": "function_call_output",
                     "call_id": tool_use_id,
-                    "output": encode_tool_output(content),
+                    "output": tool_output,
                     "is_error": is_error,
                 }));
             }
             ContentBlock::Image(_) => {
-                panic!("Responses assistant output does not support image content blocks");
+                return Err(mapping_error(
+                    "Responses assistant output does not support image content blocks",
+                ));
             }
         }
     }
 
     flush_message_item(response_id, status, &mut pending_text, &mut output);
-    Value::Array(output)
+    Ok(Value::Array(output))
 }
 
 fn flush_message_item(
@@ -118,7 +127,13 @@ fn encode_reasoning_item(
     output_index: usize,
     thinking: &Thinking,
     status: &str,
-) -> Value {
+) -> Result<Value> {
+    if let Some(item) =
+        preserved_reasoning_item_from_thinking(thinking, format!("output[{output_index}]"))?
+    {
+        return Ok(Value::Object(item));
+    }
+
     let mut item = Map::new();
     item.insert(
         "id".to_owned(),
@@ -129,12 +144,15 @@ fn encode_reasoning_item(
     item.insert("summary".to_owned(), encode_reasoning_summary(thinking));
 
     if let Some(opaque) = &thinking.opaque {
-        let encrypted_content = std::str::from_utf8(opaque)
-            .expect("Responses reasoning encrypted_content must be valid UTF-8");
+        let encrypted_content = std::str::from_utf8(opaque).map_err(|err| {
+            mapping_error(format!(
+                "Responses reasoning encrypted_content must be valid UTF-8: {err}"
+            ))
+        })?;
         item.insert("encrypted_content".to_owned(), json!(encrypted_content));
     }
 
-    Value::Object(item)
+    Ok(Value::Object(item))
 }
 
 fn encode_reasoning_summary(thinking: &Thinking) -> Value {
@@ -148,37 +166,37 @@ fn encode_reasoning_summary(thinking: &Thinking) -> Value {
     }])
 }
 
-fn encode_tool_output(content: &[ContentBlock]) -> Value {
+fn encode_tool_output(content: &[ContentBlock]) -> Result<Value> {
     if content.len() == 1
         && let ContentBlock::Text { text } = &content[0]
     {
-        return Value::String(text.clone());
+        return Ok(Value::String(text.clone()));
     }
 
-    Value::Array(
+    Ok(Value::Array(
         content
             .iter()
             .map(|block| match block {
-                ContentBlock::Text { text } => json!({
+                ContentBlock::Text { text } => Ok(json!({
                     "type": "output_text",
                     "text": text,
                     "annotations": [],
-                }),
-                ContentBlock::Thinking(_) => {
-                    panic!("Responses function_call_output cannot contain reasoning blocks");
-                }
-                ContentBlock::ToolUse { .. } => {
-                    panic!("Responses function_call_output cannot contain function_call blocks");
-                }
-                ContentBlock::ToolResult { .. } => {
-                    panic!("Responses function_call_output cannot contain nested tool results");
-                }
-                ContentBlock::Image(_) => {
-                    panic!("Responses function_call_output cannot contain image blocks");
-                }
+                })),
+                ContentBlock::Thinking(_) => Err(mapping_error(
+                    "Responses function_call_output cannot contain reasoning blocks",
+                )),
+                ContentBlock::ToolUse { .. } => Err(mapping_error(
+                    "Responses function_call_output cannot contain function_call blocks",
+                )),
+                ContentBlock::ToolResult { .. } => Err(mapping_error(
+                    "Responses function_call_output cannot contain nested tool results",
+                )),
+                ContentBlock::Image(_) => Err(mapping_error(
+                    "Responses function_call_output cannot contain image blocks",
+                )),
             })
-            .collect(),
-    )
+            .collect::<Result<Vec<_>>>()?,
+    ))
 }
 
 pub(super) fn item_id(prefix: &str, response_id: &str, output_index: usize) -> String {
@@ -212,6 +230,10 @@ pub(super) fn encode_usage(usage: &Usage) -> Value {
         },
         "total_tokens": u64::from(usage.input_tokens) + u64::from(usage.output_tokens),
     })
+}
+
+fn mapping_error(message: impl Into<String>) -> ProxyError {
+    ProxyError::ProtocolMapping(message.into())
 }
 
 #[cfg(test)]
@@ -251,7 +273,7 @@ mod tests {
             },
         };
 
-        let mut encoded = ir_response_to_responses(&response);
+        let mut encoded = ir_response_to_responses(&response).unwrap();
         assert!(encoded["created_at"].as_u64().unwrap() > 0);
         encoded["created_at"] = json!(0);
 
@@ -342,7 +364,7 @@ mod tests {
             },
         };
 
-        let encoded = ir_response_to_responses(&response);
+        let encoded = ir_response_to_responses(&response).unwrap();
 
         assert_eq!(
             encoded["output"],
@@ -373,6 +395,41 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn preserves_responses_reasoning_status_when_raw_item_is_available() {
+        let raw_item = json!({
+            "id": "rs_completed",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "encrypted_content": "enc_preserved"
+        });
+        let response = IrResponse {
+            id: "resp_incomplete".to_owned(),
+            model: "gpt-5-codex".to_owned(),
+            content: vec![ContentBlock::Thinking(Thinking {
+                text: None,
+                opaque: Some(serde_json::to_vec(&raw_item).unwrap()),
+                source: Provider::Responses,
+                echo_policy: EchoPolicy::Always,
+            })],
+            stop_reason: StopReason::MaxTokens,
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read: None,
+                cache_write: None,
+            },
+        };
+
+        let encoded = ir_response_to_responses(&response).unwrap();
+
+        assert_eq!(encoded["status"], "incomplete");
+        assert_eq!(encoded["output"][0]["id"], "rs_completed");
+        assert_eq!(encoded["output"][0]["status"], "completed");
+        assert_eq!(encoded["output"][0]["encrypted_content"], "enc_preserved");
     }
 
     #[test]
@@ -407,7 +464,7 @@ mod tests {
                 },
             };
 
-            let encoded = ir_response_to_responses(&response);
+            let encoded = ir_response_to_responses(&response).unwrap();
 
             assert_eq!(encoded["status"], expected_status);
             assert_eq!(encoded["incomplete_details"], expected_incomplete_details);
@@ -437,7 +494,7 @@ mod tests {
         };
 
         assert_eq!(
-            ir_response_to_responses(&response)["output"],
+            ir_response_to_responses(&response).unwrap()["output"],
             json!([{
                 "type": "function_call_output",
                 "call_id": "call_weather",

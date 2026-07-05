@@ -14,6 +14,10 @@ use crate::{
     protocol::tool_ids::validate_responses_tool_result_pairs,
 };
 
+use super::reasoning::{
+    encode_preserved_reasoning_item, encrypted_content, normalize_reasoning_item,
+};
+
 const PROTOCOL: &str = "responses";
 const CORE_REQUEST_FIELDS: &[&str] = &[
     "model",
@@ -178,17 +182,17 @@ fn decode_function_call_output_item(item: &Map<String, Value>, path: String) -> 
 }
 
 fn decode_reasoning_item(item: &Map<String, Value>, path: String) -> Result<Message> {
-    let encrypted_content = required_string(
-        item,
-        "encrypted_content",
-        format!("{path}.encrypted_content"),
-    )?;
+    let reasoning_item = normalize_reasoning_item(item, &path)?;
+    encrypted_content(&reasoning_item, format!("{path}.encrypted_content"))?;
 
     Ok(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Thinking(Thinking {
-            text: decode_reasoning_summary(item.get("summary"), format!("{path}.summary"))?,
-            opaque: Some(encrypted_content.as_bytes().to_vec()),
+            text: decode_reasoning_summary(
+                reasoning_item.get("summary"),
+                format!("{path}.summary"),
+            )?,
+            opaque: Some(encode_preserved_reasoning_item(reasoning_item)?),
             source: Provider::Responses,
             echo_policy: EchoPolicy::Always,
         })],
@@ -599,7 +603,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::protocol::tool_ids::responses_tool_id_map_from_request;
+    use crate::{
+        ir::request::{IrResponse, StopReason, Usage},
+        protocol::{
+            responses::encode::ir_response_to_responses,
+            tool_ids::responses_tool_id_map_from_request,
+        },
+    };
 
     #[test]
     fn decodes_codex_request_with_reasoning_and_function_calls() {
@@ -697,18 +707,18 @@ mod tests {
                 ]
             }
         );
-        assert_eq!(
-            request.messages[1],
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Thinking(Thinking {
-                    text: Some("Need the weather tool.".to_owned()),
-                    opaque: Some(b"enc_payload".to_vec()),
-                    source: Provider::Responses,
-                    echo_policy: EchoPolicy::Always,
-                })]
-            }
-        );
+        assert_eq!(request.messages[1].role, Role::Assistant);
+        let ContentBlock::Thinking(thinking) = &request.messages[1].content[0] else {
+            panic!("expected Responses reasoning item to decode as a thinking block");
+        };
+        let preserved_item: Value =
+            serde_json::from_slice(thinking.opaque.as_deref().unwrap()).unwrap();
+        assert_eq!(thinking.text, Some("Need the weather tool.".to_owned()));
+        assert_eq!(thinking.source, Provider::Responses);
+        assert_eq!(thinking.echo_policy, EchoPolicy::Always);
+        assert_eq!(preserved_item["type"], "reasoning");
+        assert_eq!(preserved_item["encrypted_content"], "enc_payload");
+        assert_eq!(preserved_item["status"], "completed");
         assert_eq!(
             request.messages[2],
             Message {
@@ -771,6 +781,53 @@ mod tests {
                 ("store".to_owned(), json!(false)),
             ])
         );
+    }
+
+    #[test]
+    fn preserves_reasoning_item_fields_and_omits_null_status_on_round_trip() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_original",
+                "summary": [{ "type": "summary_text", "text": "Need a tool." }],
+                "encrypted_content": "opaque-responses-token",
+                "status": null,
+                "provider_metadata": { "kept": true }
+            }]
+        });
+
+        let request = responses_request_to_ir(&body).unwrap();
+        let ContentBlock::Thinking(thinking) = &request.messages[0].content[0] else {
+            panic!("expected Responses reasoning item to decode as a thinking block");
+        };
+        let encoded = ir_response_to_responses(&IrResponse {
+            id: "resp_preserve".to_owned(),
+            model: request.model,
+            content: vec![ContentBlock::Thinking(thinking.clone())],
+            stop_reason: StopReason::MaxTokens,
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read: None,
+                cache_write: None,
+            },
+        })
+        .unwrap();
+        let item = encoded["output"][0].as_object().unwrap();
+
+        assert_eq!(item.get("id").unwrap(), "rs_original");
+        assert_eq!(item.get("type").unwrap(), "reasoning");
+        assert_eq!(
+            item.get("encrypted_content").unwrap(),
+            "opaque-responses-token"
+        );
+        assert_eq!(item.get("summary").unwrap()[0]["text"], "Need a tool.");
+        assert_eq!(
+            item.get("provider_metadata").unwrap(),
+            &json!({ "kept": true })
+        );
+        assert!(!item.contains_key("status"));
     }
 
     #[test]
