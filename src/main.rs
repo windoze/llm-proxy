@@ -39,6 +39,7 @@ pub mod error;
 mod ir;
 mod protocol;
 mod provider;
+mod reasoning;
 mod stream;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8080";
