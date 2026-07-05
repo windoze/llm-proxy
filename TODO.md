@@ -361,13 +361,20 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 
 ## M3 — 链 1：Chat/DeepSeek → Responses（服务 Codex）✅ 可用里程碑②
 
-### M3-01 `[TODO]` Responses 请求解析 (`protocol/responses/decode.rs`)
+### [DONE] M3-01 Responses 请求解析 (`protocol/responses/decode.rs`)
 实现 `responses_request_to_ir(body:&Value) -> Result<IrRequest>`（解析 Codex 发来的请求）：
 - `input`（全量历史数组）中各 item：`message`(role+content)、`function_call`、`function_call_output`、
   `reasoning`(带 `encrypted_content`) → 对应 IR ContentBlock
 - `instructions`/`developer` → `IrRequest.system`
 - `tools`、`tool_choice`、`max_output_tokens`→`max_tokens`
 - 记录 Codex 发来的 `reasoning` item（M5/M6 会用到 encrypted_content 还原，此处先透传保存进 Thinking.opaque）
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/responses/decode.rs` 并从 `protocol::responses` 暴露 decoder。
+- 已实现 `responses_request_to_ir`：解析 Responses `input` 全量历史中的 `message`、`function_call`、`function_call_output` 与 `reasoning` item；`reasoning.encrypted_content` 会以原始字节保存到 `Thinking.opaque`，设置 `source=Responses`、`echo_policy=Always`。
+- 已支持 `instructions`/`developer` 以及 input 中 `system`/`developer` message hoist 到 `IrRequest.system`，并解析 Responses tool、tool_choice、`max_output_tokens`、采样/stop/stream 参数与 provider `extra`。
+- 新增单元测试覆盖 Codex-style message/content、reasoning 保真、function call/output、工具定义与选择、system/developer hoist、字符串 input，以及无效 function arguments / 缺少 `encrypted_content` 的错误路径。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M3-02 `[TODO]` Responses 非流式响应编码 (`protocol/responses/encode.rs`)
 实现 `ir_response_to_responses(resp:&IrResponse) -> Value`：

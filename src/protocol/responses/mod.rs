@@ -1,3 +1,5 @@
 //! OpenAI Responses API protocol adapter.
 //!
-//! Decoder, encoder, and streaming support are added in later milestones.
+//! Encoder and streaming support are added in later milestones.
+
+pub mod decode;
