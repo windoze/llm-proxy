@@ -346,9 +346,16 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 新增 `insta` 快照比对完整 Anthropic SSE 事件序列，锁定 `message_start`、content block start/delta/stop、`message_delta` usage/stop_reason、`message_stop`，并对上游 Chat 请求 JSON 做 recorded-request 断言。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-RV `[TODO]` 【Review】M2 链 3 + 真实联调
+### [DONE] M2-RV 【Review】M2 链 3 + 真实联调
 确认：**真实 Claude Code 指向本网关 + DeepSeek 后端，完成一次带工具调用的多轮对话**（PLAN M2 验收）。
 核对流式 block index/start/stop 正确、tool ID 无错位、reasoning 正确呈现。检查是否偏离 DESIGN。记录偏差与遗留问题。
+
+完成记录：
+- 2026-07-06：已完成 M2 链 3 review。使用真实 Claude Code CLI 2.1.200 指向本地网关 `http://127.0.0.1:18080`，网关使用 `.envrc` 中的 `DEEPSEEK_API_KEY` 调用 DeepSeek 后端，未将任何凭据写入入库文件。
+- 真实联调使用隔离的临时 `CLAUDE_CONFIG_DIR` 与临时工作区，指定 `--model deepseek-chat`，仅开放 `Read` 工具；Claude Code 读取 `weather.txt` 后带回 tool_result，并完成第二轮回答，验证真实多轮 tool-use 链路可用。
+- 联调输出显示 DeepSeek reasoning 以 Anthropic thinking block 形式正确呈现，`tool_use` id 与后续 `tool_result.tool_use_id` 一致，最终 `stop_reason=end_turn`，未观察到 tool ID 错位或流式 block lifecycle 错误。
+- 偏差记录：未发现 M2 链 3 与 DESIGN/PLAN 要求不一致的偏差；M2 当前仍保持无状态实现，未引入会话存储。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets`、真实 Claude Code → llm-proxy `/v1/messages` → DeepSeek tool-use 多轮联调均通过。
 
 ---
 
