@@ -262,9 +262,15 @@ IR content → Anthropic `content` block 数组；`ToolUse` → `tool_use` block
 - 新增单元测试覆盖 thinking+tool_use 响应、所有 stop reason 映射、usage cache 字段，以及 image/tool_result 嵌套内容块编码。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-03 `[TODO]` 通用 SSE 解析基础设施 (`stream/sse.rs`)
+### [DONE] M2-03 通用 SSE 解析基础设施 (`stream/sse.rs`)
 封装基于 `eventsource-stream` 的辅助：把 `reqwest` bytes_stream 解析为 `(event_type, data)` 迭代，
 处理 OpenAI Chat 的 `data: {...}` + `data: [DONE]` 终止。为下游状态机提供干净输入。
+
+完成记录：
+- 2026-07-06：已新增 `src/stream/sse.rs` 并从 `src/stream/mod.rs` 暴露，提供 `SseEvent { event_type, data }` 与 boxed `SseEventStream`，把 `reqwest` bytes stream 通过 `eventsource-stream` 解析为下游状态机可消费的干净 SSE 输入。
+- 已实现 OpenAI Chat 专用解析入口，正常产出 `data: {...}` 事件，并将 `data: [DONE]` 视为流结束而非错误；上游传输错误映射为 `ProxyError::UpstreamHttp`，SSE/UTF-8 解析错误映射为 `ProxyError::ProtocolMapping`。
+- 新增单元测试覆盖具名事件与默认 `message` 事件解析、多行 `data:` 合并、OpenAI `[DONE]` 终止、非法 UTF-8 解析错误。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-04 `[TODO]` Chat SSE → IR event 状态机 (`stream/chat_decoder.rs`) 🔒
 实现把 OpenAI Chat 流式 chunk 转成 `IrEvent` 流的**有状态**解析器：
