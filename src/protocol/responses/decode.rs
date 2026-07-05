@@ -3,7 +3,7 @@
 // Later M3 tasks wire this staged decoder into HTTP routing and encoders.
 #![allow(dead_code)]
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::{
     error::{ProxyError, Result},
@@ -622,7 +622,9 @@ fn decode_tool(value: &Value, path: String, output: &mut Vec<ToolDef>) -> Result
 
     match tool_type {
         "function" => output.push(decode_function_tool(tool, path)?),
+        "custom" => output.push(decode_custom_tool(tool, path)?),
         "namespace" => decode_namespace_tool(tool, path, output)?,
+        "tool_search" => output.push(decode_tool_search_tool(tool, path)?),
         "web_search" => decode_web_search_tool(tool, path)?,
         other => {
             return Err(ProxyError::UnsupportedFeature {
@@ -647,6 +649,40 @@ fn decode_function_tool(tool: &Map<String, Value>, path: String) -> Result<ToolD
         name: required_string(tool, "name", format!("{path}.name"))?.to_owned(),
         description,
         input_schema,
+    })
+}
+
+fn decode_custom_tool(tool: &Map<String, Value>, path: String) -> Result<ToolDef> {
+    let description = custom_tool_description(optional_string(
+        tool,
+        "description",
+        format!("{path}.description"),
+    )?);
+
+    Ok(ToolDef {
+        name: required_string(tool, "name", format!("{path}.name"))?.to_owned(),
+        description,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "Free-form input for the original Responses custom tool."
+                }
+            },
+            "required": ["input"],
+            "additionalProperties": false
+        }),
+    })
+}
+
+fn custom_tool_description(description: Option<&str>) -> Option<String> {
+    const NOTE: &str =
+        "Original Responses custom tool; send its free-form payload in the `input` field.";
+
+    Some(match description {
+        Some(description) if !description.is_empty() => format!("{description}\n\n{NOTE}"),
+        _ => NOTE.to_owned(),
     })
 }
 
@@ -686,6 +722,33 @@ fn decode_namespace_tool(
     }
 
     Ok(())
+}
+
+fn decode_tool_search_tool(tool: &Map<String, Value>, path: String) -> Result<ToolDef> {
+    let description =
+        optional_string(tool, "description", format!("{path}.description"))?.map(ToOwned::to_owned);
+    let input_schema = tool
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(default_tool_search_schema);
+
+    Ok(ToolDef {
+        name: "tool_search".to_owned(),
+        description,
+        input_schema,
+    })
+}
+
+fn default_tool_search_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" },
+            "limit": { "type": "number" }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    })
 }
 
 fn decode_web_search_tool(tool: &Map<String, Value>, path: String) -> Result<()> {
@@ -745,7 +808,7 @@ fn decode_tool_choice(value: Option<&Value>) -> Result<ToolChoice> {
 
 fn decode_named_tool_choice(choice: &Map<String, Value>) -> Result<ToolChoice> {
     let choice_type = required_string(choice, "type", "request.tool_choice.type")?;
-    if choice_type != "function" {
+    if choice_type != "function" && choice_type != "custom" {
         return Err(ProxyError::UnsupportedFeature {
             feature: format!("tool_choice type `{choice_type}`"),
             protocol: PROTOCOL.to_owned(),
@@ -1322,13 +1385,26 @@ mod tests {
                 {
                     "type": "web_search",
                     "external_web_access": false
+                },
+                {
+                    "type": "tool_search",
+                    "description": "Search deferred tool metadata.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" },
+                            "limit": { "type": "number" }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }
                 }
             ]
         });
 
         let request = responses_request_to_ir(&body).unwrap();
 
-        assert_eq!(request.tools.len(), 2);
+        assert_eq!(request.tools.len(), 3);
         assert_eq!(request.tools[0].name, "exec_command");
         assert_eq!(
             request.tools[0].input_schema,
@@ -1359,6 +1435,71 @@ mod tests {
                 "required": ["message"],
                 "additionalProperties": false
             })
+        );
+        assert_eq!(request.tools[2].name, "tool_search");
+        assert_eq!(
+            request.tools[2].input_schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "number" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_codex_custom_tools_as_string_input_tools() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "input": "apply a patch if needed",
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Use the apply_patch tool to edit files.",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: /.+/"
+                }
+            }],
+            "tool_choice": {
+                "type": "custom",
+                "name": "apply_patch"
+            }
+        });
+
+        let request = responses_request_to_ir(&body).unwrap();
+
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, "apply_patch");
+        assert!(
+            request.tools[0]
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("Original Responses custom tool")
+        );
+        assert_eq!(
+            request.tools[0].input_schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Free-form input for the original Responses custom tool."
+                    }
+                },
+                "required": ["input"],
+                "additionalProperties": false
+            })
+        );
+        assert_eq!(
+            request.tool_choice,
+            ToolChoice::Tool("apply_patch".to_owned())
         );
     }
 

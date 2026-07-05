@@ -690,9 +690,17 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 新增 route-level wiremock 集成测试覆盖 `/v1/responses` → Anthropic 的非流式多轮 tool-use reasoning signature 往返，以及 Anthropic SSE → Responses SSE 的 thinking/signature envelope 与 tool-use 流式输出。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M6-RV `[TODO]` 【Review】M6 链 2 + 全链路
+### [DONE] M6-RV 【Review】M6 链 2 + 全链路
 确认：**Codex 接 Anthropic 后端完成带 reasoning + tool-use 的多轮对话**（PLAN M6 验收）。
 确认 **4 条链全部可用**。核对 signature 经 encrypted_content 往返无损。记录偏差。
+
+完成记录：
+- 2026-07-06：已完成 M6 链 2 review。使用隔离临时 `CODEX_HOME` 与临时工作区，将真实 Codex CLI 0.142.5 指向本地网关 `POST /v1/responses`，网关调用 `.envrc` 中配置的真实 Anthropic-compatible 后端；Codex 成功通过 shell tool 执行 `printf m6-rv-tool-ok`，第二轮携带工具输出后最终返回 `m6-rv-tool-ok`。
+- Review 中发现并修复三个直接阻塞真实 Codex/Anthropic 后端的问题：Codex 0.142.5 当前请求会携带 Responses `custom` 工具（`apply_patch`）与 `tool_search` 工具，现已分别适配为 Anthropic-compatible 工具声明；真实后端使用 token-shaped `ANTHROPIC_AUTH_TOKEN` 时需要 `Authorization: Bearer`，现保留 `sk-ant-*` 官方 key 的 `x-api-key` 路径并为 token credential 使用 bearer；该后端启用 thinking 需要透传 `output_config.effort`，现已允许 `output_config` 进入 Anthropic 后端请求。
+- 已用真实 Anthropic-compatible 后端做 Codex-protocol reasoning + tool-use 往返验证：首轮 Responses 请求启用 `thinking:{type:"adaptive"}` + `output_config:{effort:"high"}` 并要求调用 `lookup_weather`，返回 output 类型为 `reasoning,message,function_call`；第二轮将第一轮 reasoning item 的 `encrypted_content`、function_call 与 function_call_output 带回，后端接受还原后的原始 Anthropic thinking signature 并完成响应，确认 signature 经 encrypted_content 往返无损且无 400。
+- 已核对全链路状态：M2-RV（Claude Code → DeepSeek）、M3-RV（Codex → DeepSeek）、M5-RV（Claude Code → Responses）均已完成真实联调记录；本次 M6-RV 补齐 Codex → Anthropic 后端后，4 条链均可用。
+- 偏差/环境记录：`.envrc` 中当前 `ANTHROPIC_DEFAULT_OPUS_MODEL` 带有字面 `[1m]` 后缀，真实联调使用进程内 sanitized override（去除该后缀）启动网关；未修改或提交 `.envrc`，正式模型别名/配置仍按 M7-01/M7-02 处理。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets`、真实 Codex CLI → `/v1/responses` → Anthropic backend tool-use 多轮联调、真实 Anthropic-compatible backend reasoning encrypted_content/signature raw round-trip 均通过。
 
 ---
 

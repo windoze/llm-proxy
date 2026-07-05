@@ -2026,7 +2026,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/anthropic/v1/messages"))
-            .and(header_is("x-api-key", "anthropic-secret"))
+            .and(header_is("x-api-key", "sk-ant-anthropic-secret"))
             .and(header_is("anthropic-version", DEFAULT_ANTHROPIC_VERSION))
             .and(header_is("content-type", "application/json"))
             .and(body_json(first_backend_request))
@@ -2059,7 +2059,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/anthropic/v1/messages"))
-            .and(header_is("x-api-key", "anthropic-secret"))
+            .and(header_is("x-api-key", "sk-ant-anthropic-secret"))
             .and(header_is("anthropic-version", DEFAULT_ANTHROPIC_VERSION))
             .and(header_is("content-type", "application/json"))
             .and(body_json(second_backend_request))
@@ -2085,7 +2085,7 @@ mod tests {
         let first_response = post_responses(
             test_app_with_anthropic_backend(
                 format!("{}/anthropic", upstream.uri()),
-                Some("anthropic-secret"),
+                Some("sk-ant-anthropic-secret"),
                 Some("anthropic"),
                 Some("claude-sonnet-4-5"),
             ),
@@ -2147,7 +2147,7 @@ mod tests {
         let second_response = post_responses(
             test_app_with_anthropic_backend(
                 format!("{}/anthropic", upstream.uri()),
-                Some("anthropic-secret"),
+                Some("sk-ant-anthropic-secret"),
                 Some("anthropic"),
                 Some("claude-sonnet-4-5"),
             ),
@@ -2371,7 +2371,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .and(header_is("x-api-key", "anthropic-secret"))
+            .and(header_is("x-api-key", "sk-ant-anthropic-secret"))
             .and(header_is("anthropic-version", DEFAULT_ANTHROPIC_VERSION))
             .and(header_is("content-type", "application/json"))
             .and(body_json(backend_request))
@@ -2387,7 +2387,7 @@ mod tests {
         let response = post_responses(
             test_app_with_anthropic_backend(
                 format!("{}/v1/messages", upstream.uri()),
-                Some("anthropic-secret"),
+                Some("sk-ant-anthropic-secret"),
                 Some("anthropic"),
                 Some("claude-sonnet-4-5"),
             ),

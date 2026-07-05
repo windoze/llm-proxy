@@ -32,6 +32,7 @@ const ANTHROPIC_REQUEST_EXTRA_FIELDS: &[&str] = &[
     "metadata",
     "service_tier",
     "thinking",
+    "output_config",
     "context_management",
     "container",
     "mcp_servers",
@@ -578,6 +579,7 @@ mod tests {
             stream: false,
             extra: Map::from_iter([
                 ("metadata".to_owned(), json!({ "session": "s_1" })),
+                ("output_config".to_owned(), json!({ "effort": "high" })),
                 ("store".to_owned(), json!(false)),
             ]),
         };
@@ -649,7 +651,8 @@ mod tests {
                 "top_k": 40,
                 "stop_sequences": ["DONE"],
                 "stream": false,
-                "metadata": { "session": "s_1" }
+                "metadata": { "session": "s_1" },
+                "output_config": { "effort": "high" }
             })
         );
     }

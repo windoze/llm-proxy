@@ -13,6 +13,7 @@ use crate::{
 };
 
 const X_API_KEY_HEADER: &str = "x-api-key";
+const AUTHORIZATION_HEADER: &str = "authorization";
 const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
 
 /// Client for sending already-encoded Anthropic Messages API requests upstream.
@@ -20,9 +21,46 @@ const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
 pub struct AnthropicBackendClient {
     http_client: reqwest::Client,
     endpoint: reqwest::Url,
-    api_key: String,
+    auth: AnthropicBackendAuth,
     anthropic_version: String,
     cache_control: AnthropicCacheControlInjection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AnthropicBackendAuth {
+    XApiKey(String),
+    Bearer(String),
+}
+
+impl AnthropicBackendAuth {
+    fn from_token(token: &str) -> Result<Self> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(ProxyError::Config(
+                "Anthropic backend API key must not be empty".to_owned(),
+            ));
+        }
+
+        if let Some((scheme, bearer)) = token.split_once(' ')
+            && scheme.eq_ignore_ascii_case("bearer")
+            && !bearer.trim().is_empty()
+        {
+            return Ok(Self::Bearer(bearer.trim().to_owned()));
+        }
+
+        if token.starts_with("sk-ant-") {
+            Ok(Self::XApiKey(token.to_owned()))
+        } else {
+            Ok(Self::Bearer(token.to_owned()))
+        }
+    }
+
+    fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            Self::XApiKey(api_key) => request.header(X_API_KEY_HEADER, api_key),
+            Self::Bearer(token) => request.bearer_auth(token),
+        }
+    }
 }
 
 impl AnthropicBackendClient {
@@ -48,12 +86,7 @@ impl AnthropicBackendClient {
         })?;
 
         let api_key = api_key.into();
-        let api_key = api_key.trim();
-        if api_key.is_empty() {
-            return Err(ProxyError::Config(
-                "Anthropic backend API key must not be empty".to_owned(),
-            ));
-        }
+        let auth = AnthropicBackendAuth::from_token(&api_key)?;
 
         let anthropic_version = anthropic_version.into();
         let anthropic_version = anthropic_version.trim();
@@ -66,7 +99,7 @@ impl AnthropicBackendClient {
         Ok(Self {
             http_client,
             endpoint,
-            api_key: api_key.to_owned(),
+            auth,
             anthropic_version: anthropic_version.to_owned(),
             cache_control: AnthropicCacheControlInjection::Disabled,
         })
@@ -84,14 +117,11 @@ impl AnthropicBackendClient {
     /// Sends an Anthropic request and leaves the response body available as `bytes_stream()`.
     pub async fn send(&self, body: Value) -> Result<reqwest::Response> {
         let body = prepare_anthropic_request_body_with_cache_control(body, self.cache_control)?;
-        let response = self
+        let request = self
             .http_client
             .post(self.endpoint.clone())
-            .header(X_API_KEY_HEADER, &self.api_key)
-            .header(ANTHROPIC_VERSION_HEADER, &self.anthropic_version)
-            .json(&body)
-            .send()
-            .await?;
+            .header(ANTHROPIC_VERSION_HEADER, &self.anthropic_version);
+        let response = self.auth.apply(request).json(&body).send().await?;
 
         ensure_upstream_success(response).await
     }
@@ -176,7 +206,7 @@ mod tests {
         let upstream = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .and(header(X_API_KEY_HEADER, "test-anthropic-key"))
+            .and(header(X_API_KEY_HEADER, "sk-ant-test-anthropic-key"))
             .and(header(ANTHROPIC_VERSION_HEADER, "2023-06-01"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -189,7 +219,7 @@ mod tests {
 
         let client = AnthropicBackendClient::new(
             format!("{}/v1/messages", upstream.uri()),
-            " test-anthropic-key ",
+            " sk-ant-test-anthropic-key ",
             " 2023-06-01 ",
         )
         .unwrap();
@@ -241,11 +271,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_can_enable_cache_control_injection() {
+    async fn posts_bearer_auth_for_token_credentials() {
         let upstream = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .and(header(X_API_KEY_HEADER, "test-anthropic-key"))
+            .and(header(AUTHORIZATION_HEADER, "Bearer test-bearer-token"))
             .and(header(ANTHROPIC_VERSION_HEADER, "2023-06-01"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "msg_1",
@@ -265,7 +295,47 @@ mod tests {
 
         let client = AnthropicBackendClient::new(
             format!("{}/v1/messages", upstream.uri()),
-            "test-anthropic-key",
+            "Bearer test-bearer-token",
+            "2023-06-01",
+        )
+        .unwrap();
+
+        client
+            .send(json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 128,
+                "messages": []
+            }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_can_enable_cache_control_injection() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header(X_API_KEY_HEADER, "sk-ant-test-anthropic-key"))
+            .and(header(ANTHROPIC_VERSION_HEADER, "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-5",
+                "content": [],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let client = AnthropicBackendClient::new(
+            format!("{}/v1/messages", upstream.uri()),
+            "sk-ant-test-anthropic-key",
             "2023-06-01",
         )
         .unwrap()

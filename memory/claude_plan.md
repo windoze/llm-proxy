@@ -12,21 +12,28 @@ I will follow the repository task order without doing broad issue triage first. 
 
 ## Current Task
 
-Selected task: `M6-07` — assemble chain 2 and add integration tests.
+Selected task: `M6-RV` — review M6 chain 2 and the full four-chain milestone.
 
 Planned execution:
 
-1. Read the `M6-07` task details in `TODO.md` plus the relevant phase plan/design notes.
-2. Inspect the current Anthropic-to-Responses request/stream conversion code, backend clients, router assembly, and existing integration-test patterns.
-3. Implement chain 2 end-to-end routing so Anthropic requests can target the Responses backend while preserving rich thinking/tool semantics and enabling the optional Anthropic backend cache-control behavior only where specified.
-4. Add focused integration tests for the assembled chain 2 route, including request conversion and streaming behavior expected by the task.
-5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. Mark `M6-07` done in `TODO.md`, update this progress file, commit, and stop.
+1. Use `TODO.md` as the source of truth and treat `M6-RV` as the first incomplete task.
+2. Treat the latest `[M6-07] Assemble Responses to Anthropic chain` commit as directly relevant review input, not as a reason for broad unrelated triage.
+3. Inspect the documented real-client test procedure and existing ignored e2e test surfaces for M6 chain 2.
+4. Run required validation in order: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, then `cargo test --all --all-targets`.
+5. If credentials and CLIs are available, run the M6 real Codex → gateway `/v1/responses` → Anthropic backend validation; if a directly blocking defect appears, fix it before marking the task done.
+6. Confirm all four chains have completed review evidence in `TODO.md` and that chain 2 preserves Anthropic signature ↔ Responses `encrypted_content` reasoning round-trip.
+7. Update `TODO.md` by marking `M6-RV` `[DONE]` with a completion record, update this file at milestones, commit, and stop.
 
 Progress:
 
-- Identified `M6-07` as the first incomplete task.
-- Confirmed the latest commit completed `M6-06` and did not name unfinished work that changes this task.
-- Found the existing Anthropic request/response encoders, Anthropic SSE decoder, and Responses SSE encoder already preserve Anthropic thinking signatures through Responses `encrypted_content`; the remaining work is route/backend assembly plus integration tests.
-- Added `/v1/responses` backend selection for Anthropic, Anthropic backend client wiring with cache-control injection, non-streaming and streaming Anthropic-to-Responses response adapters, route tests for chain 2, and Anthropic request-message coalescing needed for Codex reasoning/function-call histories.
-- Completed `M6-07`, updated `TODO.md` with the `[DONE]` prefix and completion record, and completed formatting, clippy, and full test-suite validation.
+- Identified `M6-RV` as the first incomplete task.
+- Confirmed the latest commit is `[M6-07] Assemble Responses to Anthropic chain`, directly relevant to this review.
+- Repository validation passed once before real-client testing.
+- Real Codex reached the gateway but failed because Codex 0.142.5 now includes a top-level Responses `custom` tool declaration for `apply_patch`; the decoder rejected that before the chain could run.
+- Added a focused decoder fix to adapt Responses `custom` tool declarations into Anthropic-compatible string-input tools, plus a regression test based on the captured Codex request shape.
+- A rerun exposed the next Codex 0.142.5 deferred-tool declaration, `tool_search`; added parsing for it as a function-style tool using its declared schema so the full current Codex tool list can enter the Anthropic backend.
+- After tool parsing passed, the real Anthropic-compatible backend rejected the credential when sent as `x-api-key`; updated `AnthropicBackendClient` to use official `x-api-key` for `sk-ant-` keys and bearer auth for token-shaped credentials, with provider tests covering both modes.
+- The real backend then rejected the `.envrc` model value because it includes a literal `[1m]` suffix; the next review retry will use a process-local sanitized model override and will not modify or commit `.envrc`.
+- A forced real reasoning round-trip exposed the backend's Anthropic-compatible thinking dialect: it requires `thinking.type=adaptive` and `output_config.effort`; added `output_config` to Anthropic request extra pass-through so Codex-protocol requests can enable reasoning for this backend.
+- Final validation passed: full Rust validation is green, real Codex CLI tool-use through `/v1/responses` to the Anthropic backend returned `m6-rv-tool-ok`, and a real adaptive-thinking Codex-protocol two-turn request verified Anthropic signature ↔ Responses `encrypted_content` round-trip.
+- Updated `TODO.md` to mark `M6-RV` `[DONE]` with completion evidence and environment notes.
