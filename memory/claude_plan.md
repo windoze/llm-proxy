@@ -34,3 +34,26 @@ Progress:
 - Added tests covering capability decisions, extra filtering, Responses json_schema emulation to Anthropic tools, Chat/Responses structured-output translation, and unsupported structured-output/tool conflicts.
 - Completed validation after changes: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` all passed.
 - Updated `TODO.md` to mark `M7-04` `[DONE]` with completion evidence.
+## Execution Plan - 2026-07-06
+
+I will follow `TODO.md` as the authoritative task list and complete exactly the first task whose heading is not prefixed with `[DONE]`.
+
+1. Read `TODO.md` first to identify the first incomplete task and its validation requirements.
+2. Check the latest commit only for directly relevant unfinished work tied to that task.
+3. Inspect only the files needed for the selected task.
+4. Implement the task fully, avoiding workaround behavior or spec deviations.
+5. Run the required formatting, linting, and tests in the requested order when code changes are made.
+6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and recording completion details.
+7. Update this plan file at major milestones.
+8. Commit all changes for this task with a descriptive message and stop.
+
+## Progress
+
+- Selected first incomplete task: `M7-05 Observability`.
+- Latest commit (`M7-04`) does not mention unfinished work directly blocking observability.
+- Next steps: inspect `main.rs`, config, backend clients, and route tests; then add structured request logging plus optional redacted request/response dumps.
+- Implemented structured per-request observability context, route/backend/latency/token logs, streaming usage tracking, and `LLM_PROXY_OBSERVABILITY_DUMP` redacted body dumps.
+- Refactored the cross-cutting observability implementation into `src/observability.rs` to avoid further bloating `src/main.rs`.
+- Updated related testing notes and redaction coverage tests.
+- Validation completed: baseline `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` passed before code changes; final `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` passed after implementation and modularization.
+- Marked `M7-05 Observability` as `[DONE]` in `TODO.md`.

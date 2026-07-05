@@ -17,6 +17,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
+    observability::{RequestObservation, observe_ir_event_stream},
     protocol::{
         anthropic::{
             decode::{anthropic_request_to_ir, anthropic_response_to_ir},
@@ -47,6 +48,7 @@ use crate::{
 mod config;
 pub mod error;
 mod ir;
+mod observability;
 mod protocol;
 mod provider;
 mod reasoning;
@@ -66,6 +68,7 @@ struct AppState {
     router: ModelRouter,
     anthropic_default_max_tokens: Option<u32>,
     anthropic_cache_control: AnthropicCacheControlInjection,
+    observability_dump: bool,
 }
 
 impl AppState {
@@ -77,6 +80,7 @@ impl AppState {
         };
         let passthrough_upstream_url = config.passthrough_upstream_url.clone();
         let anthropic_default_max_tokens = config.anthropic_default_max_tokens;
+        let observability_dump = config.switches.observability_dump;
 
         Self {
             http_client: reqwest::Client::new(),
@@ -84,6 +88,7 @@ impl AppState {
             router: ModelRouter::new(config),
             anthropic_default_max_tokens,
             anthropic_cache_control,
+            observability_dump,
         }
     }
 }
@@ -183,23 +188,38 @@ async fn anthropic_messages(
     headers: HeaderMap,
     body: std::result::Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let mut observation = RequestObservation::new(
+        FrontendEndpoint::AnthropicMessages,
+        state.observability_dump,
+    );
     let result = match body {
-        Ok(Json(body)) => anthropic_messages_inner(&state, headers, body).await,
+        Ok(Json(body)) => {
+            observation.dump_frontend_request(&headers, &body);
+            anthropic_messages_inner(&state, headers, body, &mut observation).await
+        }
         Err(rejection) => Err(json_rejection_error(rejection)),
     };
 
-    result.unwrap_or_else(error::ProxyError::into_anthropic_response)
+    match result {
+        Ok(response) => response,
+        Err(error) => {
+            observation.log_error(&error);
+            error.into_anthropic_response()
+        }
+    }
 }
 
 async fn anthropic_messages_inner(
     state: &AppState,
     headers: HeaderMap,
     body: Value,
+    observation: &mut RequestObservation,
 ) -> error::Result<Response> {
     let mut ir_request = anthropic_request_to_ir(&body)?;
     let route = state
         .router
         .route(FrontendEndpoint::AnthropicMessages, &ir_request.model)?;
+    observation.set_route(&route, ir_request.stream);
     ir_request.model = route.backend_model().to_owned();
     apply_anthropic_defaults(&mut ir_request, state, route.backend())?;
 
@@ -208,23 +228,23 @@ async fn anthropic_messages_inner(
             let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
             let upstream_response =
-                send_chat_request(state, &headers, route.backend(), chat_body).await?;
+                send_chat_request(state, &headers, route.backend(), chat_body, observation).await?;
 
             if ir_request.stream {
-                chat_stream_to_anthropic_response(upstream_response).await
+                chat_stream_to_anthropic_response(upstream_response, observation.clone()).await
             } else {
-                chat_json_to_anthropic_response(upstream_response).await
+                chat_json_to_anthropic_response(upstream_response, observation).await
             }
         }
         config::BackendKind::Responses => {
             let responses_body = ir_request_to_responses(&ir_request)?;
             let upstream_response =
-                send_responses_request(state, route.backend(), responses_body).await?;
+                send_responses_request(state, route.backend(), responses_body, observation).await?;
 
             if ir_request.stream {
-                responses_stream_to_anthropic_response(upstream_response).await
+                responses_stream_to_anthropic_response(upstream_response, observation.clone()).await
             } else {
-                responses_json_to_anthropic_response(upstream_response).await
+                responses_json_to_anthropic_response(upstream_response, observation).await
             }
         }
         config::BackendKind::Anthropic => Err(error::ProxyError::Config(
@@ -239,23 +259,36 @@ async fn openai_responses(
     headers: HeaderMap,
     body: std::result::Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let mut observation =
+        RequestObservation::new(FrontendEndpoint::OpenAiResponses, state.observability_dump);
     let result = match body {
-        Ok(Json(body)) => openai_responses_inner(&state, headers, body).await,
+        Ok(Json(body)) => {
+            observation.dump_frontend_request(&headers, &body);
+            openai_responses_inner(&state, headers, body, &mut observation).await
+        }
         Err(rejection) => Err(json_rejection_error(rejection)),
     };
 
-    result.unwrap_or_else(error::ProxyError::into_responses_response)
+    match result {
+        Ok(response) => response,
+        Err(error) => {
+            observation.log_error(&error);
+            error.into_responses_response()
+        }
+    }
 }
 
 async fn openai_responses_inner(
     state: &AppState,
     headers: HeaderMap,
     body: Value,
+    observation: &mut RequestObservation,
 ) -> error::Result<Response> {
     let mut ir_request = responses_request_to_ir(&body)?;
     let route = state
         .router
         .route(FrontendEndpoint::OpenAiResponses, &ir_request.model)?;
+    observation.set_route(&route, ir_request.stream);
     ir_request.model = route.backend_model().to_owned();
 
     match route.backend_kind() {
@@ -263,24 +296,24 @@ async fn openai_responses_inner(
             let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
             let upstream_response =
-                send_chat_request(state, &headers, route.backend(), chat_body).await?;
+                send_chat_request(state, &headers, route.backend(), chat_body, observation).await?;
 
             if ir_request.stream {
-                chat_stream_to_responses_response(upstream_response).await
+                chat_stream_to_responses_response(upstream_response, observation.clone()).await
             } else {
-                chat_json_to_responses_response(upstream_response).await
+                chat_json_to_responses_response(upstream_response, observation).await
             }
         }
         config::BackendKind::Anthropic => {
             apply_anthropic_defaults(&mut ir_request, state, route.backend())?;
             let anthropic_body = ir_request_to_anthropic(&ir_request)?;
             let upstream_response =
-                send_anthropic_request(state, route.backend(), anthropic_body).await?;
+                send_anthropic_request(state, route.backend(), anthropic_body, observation).await?;
 
             if ir_request.stream {
-                anthropic_stream_to_responses_response(upstream_response).await
+                anthropic_stream_to_responses_response(upstream_response, observation.clone()).await
             } else {
-                anthropic_json_to_responses_response(upstream_response).await
+                anthropic_json_to_responses_response(upstream_response, observation).await
             }
         }
 
@@ -299,7 +332,9 @@ async fn send_chat_request(
     headers: &HeaderMap,
     backend: &config::BackendConfig,
     body: Value,
+    observation: &RequestObservation,
 ) -> error::Result<reqwest::Response> {
+    observation.dump_json("upstream_request", &body);
     let upstream_url = parse_chat_completions_url(backend)?;
     let bearer_token = upstream_bearer_token(backend, headers)?;
     let upstream_response = state
@@ -317,7 +352,10 @@ async fn send_responses_request(
     state: &AppState,
     backend: &config::BackendConfig,
     body: Value,
+    observation: &RequestObservation,
 ) -> error::Result<reqwest::Response> {
+    let prepared_body = provider::responses_backend::prepare_responses_request_body(body.clone())?;
+    observation.dump_json("upstream_request", &prepared_body);
     responses_backend_client(state, backend)?.send(body).await
 }
 
@@ -326,48 +364,76 @@ async fn send_anthropic_request(
     state: &AppState,
     backend: &config::BackendConfig,
     body: Value,
+    observation: &RequestObservation,
 ) -> error::Result<reqwest::Response> {
+    let prepared_body =
+        provider::anthropic_cache::prepare_anthropic_request_body_with_cache_control(
+            body.clone(),
+            state.anthropic_cache_control,
+        )?;
+    observation.dump_json("upstream_request", &prepared_body);
     anthropic_backend_client(state, backend)?.send(body).await
 }
 
 async fn chat_json_to_anthropic_response(
     upstream_response: reqwest::Response,
+    observation: &RequestObservation,
 ) -> error::Result<Response> {
     let chat_response = upstream_response.json::<Value>().await?;
+    observation.dump_json("upstream_response", &chat_response);
     let ir_response = chat_response_to_ir(&chat_response)?;
-    Ok(Json(ir_response_to_anthropic(&ir_response)?).into_response())
+    let response_body = ir_response_to_anthropic(&ir_response)?;
+    observation.dump_json("frontend_response", &response_body);
+    observation.log_success(Some(&ir_response.usage));
+    Ok(Json(response_body).into_response())
 }
 
 async fn responses_json_to_anthropic_response(
     upstream_response: reqwest::Response,
+    observation: &RequestObservation,
 ) -> error::Result<Response> {
     let responses_response = upstream_response.json::<Value>().await?;
+    observation.dump_json("upstream_response", &responses_response);
     let ir_response = responses_response_to_ir(&responses_response)?;
-    Ok(Json(ir_response_to_anthropic(&ir_response)?).into_response())
+    let response_body = ir_response_to_anthropic(&ir_response)?;
+    observation.dump_json("frontend_response", &response_body);
+    observation.log_success(Some(&ir_response.usage));
+    Ok(Json(response_body).into_response())
 }
 
 async fn chat_json_to_responses_response(
     upstream_response: reqwest::Response,
+    observation: &RequestObservation,
 ) -> error::Result<Response> {
     let chat_response = upstream_response.json::<Value>().await?;
+    observation.dump_json("upstream_response", &chat_response);
     let ir_response = chat_response_to_ir(&chat_response)?;
-    Ok(Json(ir_response_to_responses(&ir_response)?).into_response())
+    let response_body = ir_response_to_responses(&ir_response)?;
+    observation.dump_json("frontend_response", &response_body);
+    observation.log_success(Some(&ir_response.usage));
+    Ok(Json(response_body).into_response())
 }
 
 /// Converts a non-streaming Anthropic backend response into a Responses JSON response.
 async fn anthropic_json_to_responses_response(
     upstream_response: reqwest::Response,
+    observation: &RequestObservation,
 ) -> error::Result<Response> {
     let anthropic_response = upstream_response.json::<Value>().await?;
+    observation.dump_json("upstream_response", &anthropic_response);
     let ir_response = anthropic_response_to_ir(&anthropic_response)?;
-    Ok(Json(ir_response_to_responses(&ir_response)?).into_response())
+    let response_body = ir_response_to_responses(&ir_response)?;
+    observation.dump_json("frontend_response", &response_body);
+    observation.log_success(Some(&ir_response.usage));
+    Ok(Json(response_body).into_response())
 }
 
 async fn chat_stream_to_anthropic_response(
     upstream_response: reqwest::Response,
+    observation: RequestObservation,
 ) -> error::Result<Response> {
     let chat_sse = parse_openai_chat_sse(upstream_response.bytes_stream());
-    let ir_events = chat_sse_to_ir_events(chat_sse);
+    let ir_events = observe_ir_event_stream(chat_sse_to_ir_events(chat_sse), observation);
     let anthropic_sse = ir_events_to_anthropic_sse(ir_events);
 
     let mut response = Response::new(Body::from_stream(anthropic_sse));
@@ -383,9 +449,10 @@ async fn chat_stream_to_anthropic_response(
 
 async fn responses_stream_to_anthropic_response(
     upstream_response: reqwest::Response,
+    observation: RequestObservation,
 ) -> error::Result<Response> {
     let responses_sse = parse_reqwest_sse(upstream_response.bytes_stream());
-    let ir_events = responses_sse_to_ir_events(responses_sse);
+    let ir_events = observe_ir_event_stream(responses_sse_to_ir_events(responses_sse), observation);
     let anthropic_sse = ir_events_to_anthropic_sse(ir_events);
 
     let mut response = Response::new(Body::from_stream(anthropic_sse));
@@ -401,9 +468,10 @@ async fn responses_stream_to_anthropic_response(
 
 async fn chat_stream_to_responses_response(
     upstream_response: reqwest::Response,
+    observation: RequestObservation,
 ) -> error::Result<Response> {
     let chat_sse = parse_openai_chat_sse(upstream_response.bytes_stream());
-    let ir_events = chat_sse_to_ir_events(chat_sse);
+    let ir_events = observe_ir_event_stream(chat_sse_to_ir_events(chat_sse), observation);
     let responses_sse = ir_events_to_responses_sse(ir_events);
 
     let mut response = Response::new(Body::from_stream(responses_sse));
@@ -420,9 +488,10 @@ async fn chat_stream_to_responses_response(
 /// Converts Anthropic backend SSE into Responses SSE through streaming IR events.
 async fn anthropic_stream_to_responses_response(
     upstream_response: reqwest::Response,
+    observation: RequestObservation,
 ) -> error::Result<Response> {
     let anthropic_sse = parse_reqwest_sse(upstream_response.bytes_stream());
-    let ir_events = anthropic_sse_to_ir_events(anthropic_sse);
+    let ir_events = observe_ir_event_stream(anthropic_sse_to_ir_events(anthropic_sse), observation);
     let responses_sse = ir_events_to_responses_sse(ir_events);
 
     let mut response = Response::new(Body::from_stream(responses_sse));

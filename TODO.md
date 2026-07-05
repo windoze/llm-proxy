@@ -751,8 +751,15 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 已补充单元测试覆盖能力表分类、extra 过滤、Responses json_schema → Anthropic tool 模拟、Responses json_schema → Chat `response_format`、Chat `response_format` → Responses `text.format`、以及结构化输出与用户 tools 冲突时的拒绝路径。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M7-05 `[TODO]` Observability
+### [DONE] M7-05 Observability
 `tracing` 结构化日志：每请求记录链路、后端、耗时、token 用量。加可选的请求/响应 dump（调试开关，脱敏凭据）。
+
+完成记录：
+- 2026-07-06：已新增 `src/observability.rs`，为 `/v1/messages` 与 `/v1/responses` 增加请求级结构化 observability context，记录 request id、前端端点、转换链路、后端名称/类型、客户端 model、上游 model、是否流式、耗时与 token/cache usage。
+- 非流式路径在解析上游响应为 IR 后记录 usage；流式路径在 IR event 层观察 `MessageDelta.usage` 与 `MessageStop`，在流完成时记录 token 用量，并对流式错误/缺少 terminal event 记录 warning。
+- 新增 `LLM_PROXY_OBSERVABILITY_DUMP` / `switches.observability_dump` 调试开关；开启后记录前端请求、上游请求、上游响应与前端响应 JSON dump，并对鉴权头、API key/token/secret/password、`encrypted_content` 与 `signature` 做递归脱敏。`TESTING.md` 已补充启用方式。
+- 新增单元测试覆盖 JSON/header dump 脱敏与配置开关解析。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M7-06 `[TODO]` 限流与重试
 对后端请求的重试与指数退避（尊重 `Retry-After`）。可配置并发/超时。

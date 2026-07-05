@@ -22,6 +22,8 @@ pub const MODEL_ALIASES_ENV: &str = "LLM_PROXY_MODEL_ALIASES";
 pub const CACHE_INJECTION_ENV: &str = "LLM_PROXY_ANTHROPIC_CACHE_INJECTION";
 /// Environment variable enabling the optional reasoning-store fallback.
 pub const REASONING_STORE_ENV: &str = "LLM_PROXY_REASONING_STORE";
+/// Environment variable enabling redacted request/response body dumps in debug logs.
+pub const OBSERVABILITY_DUMP_ENV: &str = "LLM_PROXY_OBSERVABILITY_DUMP";
 /// Environment variable overriding the Chat Completions endpoint.
 pub const CHAT_COMPLETIONS_URL_ENV: &str = "LLM_PROXY_CHAT_COMPLETIONS_URL";
 /// Environment variable with the DeepSeek/OpenAI-compatible Chat API key.
@@ -379,6 +381,7 @@ impl ModelAlias {
 pub struct SwitchConfig {
     pub anthropic_cache_injection: bool,
     pub reasoning_store: bool,
+    pub observability_dump: bool,
 }
 
 impl Default for SwitchConfig {
@@ -386,6 +389,7 @@ impl Default for SwitchConfig {
         Self {
             anthropic_cache_injection: true,
             reasoning_store: false,
+            observability_dump: false,
         }
     }
 }
@@ -445,6 +449,10 @@ fn apply_env_overrides(config: &mut Config, env: &BTreeMap<String, String>) -> R
     }
     if let Some(reasoning_store) = env_value(env, REASONING_STORE_ENV) {
         config.switches.reasoning_store = parse_bool_env(REASONING_STORE_ENV, &reasoning_store)?;
+    }
+    if let Some(observability_dump) = env_value(env, OBSERVABILITY_DUMP_ENV) {
+        config.switches.observability_dump =
+            parse_bool_env(OBSERVABILITY_DUMP_ENV, &observability_dump)?;
     }
     if let Some(backend) = env_value(env, ANTHROPIC_MESSAGES_BACKEND_ENV) {
         config.routing.anthropic_messages_backend = Some(backend);
@@ -721,6 +729,7 @@ passthrough_upstream_url = "http://127.0.0.1:9100/sse"
 [switches]
 anthropic_cache_injection = false
 reasoning_store = true
+observability_dump = true
 
 [routing]
 anthropic_messages_backend = "responses"
@@ -754,6 +763,7 @@ model = "gpt-5.1"
         );
         assert!(!config.switches.anthropic_cache_injection);
         assert!(config.switches.reasoning_store);
+        assert!(config.switches.observability_dump);
         assert_eq!(
             config.routing.anthropic_messages_backend.as_deref(),
             Some("responses")
@@ -831,6 +841,7 @@ listen_addr = "127.0.0.1:17777"
             (ANTHROPIC_DEFAULT_MAX_TOKENS_ENV, "8192"),
             (CACHE_INJECTION_ENV, "off"),
             (REASONING_STORE_ENV, "yes"),
+            (OBSERVABILITY_DUMP_ENV, "true"),
             (
                 MODEL_ALIASES_ENV,
                 r#"{"sonnet":{"backend":"anthropic","model":"claude-env"}}"#,
@@ -842,6 +853,7 @@ listen_addr = "127.0.0.1:17777"
         assert_eq!(config.listen_addr, "127.0.0.1:18080");
         assert!(!config.switches.anthropic_cache_injection);
         assert!(config.switches.reasoning_store);
+        assert!(config.switches.observability_dump);
         assert_eq!(config.anthropic_default_max_tokens, Some(8192));
         assert_eq!(
             config.backend("deepseek").unwrap().api_key.as_deref(),

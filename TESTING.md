@@ -78,8 +78,8 @@ set -a && source .envrc && set +a
 # /v1/responses 默认将 deepseek-* 模型发往 Chat 后端，其他模型在
 # ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN 存在时发往 Anthropic 后端；
 # 可用 LLM_PROXY_RESPONSES_BACKEND=chat|anthropic|auto 显式覆盖。
-# 打开详细日志便于观察转换过程
-RUST_LOG=llm_proxy=debug,info cargo run
+# 打开详细日志便于观察转换过程；需要请求/响应 body dump 时显式启用脱敏 dump
+RUST_LOG=llm_proxy=debug,info LLM_PROXY_OBSERVABILITY_DUMP=true cargo run
 ```
 
 健康检查：
