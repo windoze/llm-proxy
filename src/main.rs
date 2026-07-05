@@ -21,7 +21,8 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     protocol::{
         anthropic::{
-            decode::anthropic_request_to_ir, encode::ir_response_to_anthropic,
+            decode::{anthropic_request_to_ir, anthropic_response_to_ir},
+            encode::{ir_request_to_anthropic, ir_response_to_anthropic},
             stream::ir_events_to_anthropic_sse,
         },
         openai_chat::{decode::chat_response_to_ir, encode::ir_request_to_chat},
@@ -31,8 +32,13 @@ use crate::{
             stream::ir_events_to_responses_sse,
         },
     },
-    provider::{CapabilityProfile, deepseek::DeepSeek, responses_backend::ResponsesBackendClient},
+    provider::{
+        CapabilityProfile, anthropic_backend::AnthropicBackendClient,
+        anthropic_cache::AnthropicCacheControlInjection, deepseek::DeepSeek,
+        responses_backend::ResponsesBackendClient,
+    },
     stream::{
+        anthropic_decoder::anthropic_sse_to_ir_events,
         chat_decoder::chat_sse_to_ir_events,
         responses_decoder::responses_sse_to_ir_events,
         sse::{parse_openai_chat_sse, parse_reqwest_sse},
@@ -54,7 +60,13 @@ const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 const OPENAI_API_ENDPOINT_ENV: &str = "OPENAI_API_ENDPOINT";
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const ANTHROPIC_MESSAGES_BACKEND_ENV: &str = "LLM_PROXY_ANTHROPIC_MESSAGES_BACKEND";
+const RESPONSES_BACKEND_ENV: &str = "LLM_PROXY_RESPONSES_BACKEND";
+const ANTHROPIC_BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
+const ANTHROPIC_AUTH_TOKEN_ENV: &str = "ANTHROPIC_AUTH_TOKEN";
+const ANTHROPIC_VERSION_ENV: &str = "ANTHROPIC_VERSION";
+const ANTHROPIC_DEFAULT_OPUS_MODEL_ENV: &str = "ANTHROPIC_DEFAULT_OPUS_MODEL";
 const ANTHROPIC_DEFAULT_MAX_TOKENS_ENV: &str = "LLM_PROXY_ANTHROPIC_DEFAULT_MAX_TOKENS";
+const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 4096;
 
 /// Shared HTTP clients and runtime configuration used by request handlers.
@@ -67,6 +79,11 @@ struct AppState {
     responses_endpoint: Option<String>,
     responses_api_key: Option<String>,
     anthropic_messages_backend: Option<String>,
+    responses_backend: Option<String>,
+    anthropic_base_url: Option<String>,
+    anthropic_auth_token: Option<String>,
+    anthropic_version: String,
+    anthropic_default_model: Option<String>,
     anthropic_default_max_tokens: Option<String>,
 }
 
@@ -91,6 +108,22 @@ impl AppState {
             anthropic_messages_backend: env::var(ANTHROPIC_MESSAGES_BACKEND_ENV)
                 .ok()
                 .filter(|backend| !backend.trim().is_empty()),
+            responses_backend: env::var(RESPONSES_BACKEND_ENV)
+                .ok()
+                .filter(|backend| !backend.trim().is_empty()),
+            anthropic_base_url: env::var(ANTHROPIC_BASE_URL_ENV)
+                .ok()
+                .filter(|endpoint| !endpoint.trim().is_empty()),
+            anthropic_auth_token: env::var(ANTHROPIC_AUTH_TOKEN_ENV)
+                .ok()
+                .filter(|key| !key.trim().is_empty()),
+            anthropic_version: env::var(ANTHROPIC_VERSION_ENV)
+                .ok()
+                .filter(|version| !version.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_ANTHROPIC_VERSION.to_owned()),
+            anthropic_default_model: env::var(ANTHROPIC_DEFAULT_OPUS_MODEL_ENV)
+                .ok()
+                .filter(|model| !model.trim().is_empty()),
             anthropic_default_max_tokens: env::var(ANTHROPIC_DEFAULT_MAX_TOKENS_ENV).ok(),
         }
     }
@@ -100,6 +133,12 @@ impl AppState {
 enum AnthropicMessagesBackend {
     Chat,
     Responses,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiResponsesBackend {
+    Chat,
+    Anthropic,
 }
 
 /// Health-check payload returned by `GET /health`.
@@ -224,21 +263,36 @@ async fn anthropic_messages(
     }
 }
 
-/// Handles OpenAI Responses API requests by proxying them to a Chat-compatible backend.
+/// Handles OpenAI Responses API requests by proxying them to the selected backend protocol.
 async fn openai_responses(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> error::Result<Response> {
     let profile = DeepSeek;
-    let ir_request = responses_request_to_ir(&body)?;
-    let chat_body = ir_request_to_chat(&ir_request, &profile)?;
-    let upstream_response = send_chat_request(&state, &headers, chat_body).await?;
+    let mut ir_request = responses_request_to_ir(&body)?;
+    match select_openai_responses_backend(&ir_request, &state)? {
+        OpenAiResponsesBackend::Chat => {
+            let chat_body = ir_request_to_chat(&ir_request, &profile)?;
+            let upstream_response = send_chat_request(&state, &headers, chat_body).await?;
 
-    if ir_request.stream {
-        chat_stream_to_responses_response(upstream_response).await
-    } else {
-        chat_json_to_responses_response(upstream_response).await
+            if ir_request.stream {
+                chat_stream_to_responses_response(upstream_response).await
+            } else {
+                chat_json_to_responses_response(upstream_response).await
+            }
+        }
+        OpenAiResponsesBackend::Anthropic => {
+            apply_responses_anthropic_backend_defaults(&mut ir_request, &state)?;
+            let anthropic_body = ir_request_to_anthropic(&ir_request)?;
+            let upstream_response = send_anthropic_request(&state, anthropic_body).await?;
+
+            if ir_request.stream {
+                anthropic_stream_to_responses_response(upstream_response).await
+            } else {
+                anthropic_json_to_responses_response(upstream_response).await
+            }
+        }
     }
 }
 
@@ -264,6 +318,11 @@ async fn send_responses_request(state: &AppState, body: Value) -> error::Result<
     responses_backend_client(state)?.send(body).await
 }
 
+/// Sends an already-encoded Anthropic Messages request to the configured rich backend.
+async fn send_anthropic_request(state: &AppState, body: Value) -> error::Result<reqwest::Response> {
+    anthropic_backend_client(state)?.send(body).await
+}
+
 async fn chat_json_to_anthropic_response(
     upstream_response: reqwest::Response,
 ) -> error::Result<Response> {
@@ -285,6 +344,15 @@ async fn chat_json_to_responses_response(
 ) -> error::Result<Response> {
     let chat_response = upstream_response.json::<Value>().await?;
     let ir_response = chat_response_to_ir(&chat_response)?;
+    Ok(Json(ir_response_to_responses(&ir_response)?).into_response())
+}
+
+/// Converts a non-streaming Anthropic backend response into a Responses JSON response.
+async fn anthropic_json_to_responses_response(
+    upstream_response: reqwest::Response,
+) -> error::Result<Response> {
+    let anthropic_response = upstream_response.json::<Value>().await?;
+    let ir_response = anthropic_response_to_ir(&anthropic_response)?;
     Ok(Json(ir_response_to_responses(&ir_response)?).into_response())
 }
 
@@ -329,6 +397,25 @@ async fn chat_stream_to_responses_response(
 ) -> error::Result<Response> {
     let chat_sse = parse_openai_chat_sse(upstream_response.bytes_stream());
     let ir_events = chat_sse_to_ir_events(chat_sse);
+    let responses_sse = ir_events_to_responses_sse(ir_events);
+
+    let mut response = Response::new(Body::from_stream(responses_sse));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+/// Converts Anthropic backend SSE into Responses SSE through streaming IR events.
+async fn anthropic_stream_to_responses_response(
+    upstream_response: reqwest::Response,
+) -> error::Result<Response> {
+    let anthropic_sse = parse_reqwest_sse(upstream_response.bytes_stream());
+    let ir_events = anthropic_sse_to_ir_events(anthropic_sse);
     let responses_sse = ir_events_to_responses_sse(ir_events);
 
     let mut response = Response::new(Body::from_stream(responses_sse));
@@ -425,6 +512,66 @@ fn is_deepseek_model(model: &str) -> bool {
     model.starts_with("deepseek-")
 }
 
+/// Selects the backend that should serve a client-facing OpenAI Responses request.
+fn select_openai_responses_backend(
+    request: &ir::request::IrRequest,
+    state: &AppState,
+) -> error::Result<OpenAiResponsesBackend> {
+    match state.responses_backend.as_deref() {
+        Some(configured) => parse_openai_responses_backend(configured, request, state),
+        None => Ok(auto_openai_responses_backend(request, state)),
+    }
+}
+
+/// Parses the temporary pre-M7 backend override for `/v1/responses`.
+fn parse_openai_responses_backend(
+    configured: &str,
+    request: &ir::request::IrRequest,
+    state: &AppState,
+) -> error::Result<OpenAiResponsesBackend> {
+    match configured.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(auto_openai_responses_backend(request, state)),
+        "chat" | "deepseek" | "deepseek-chat" => Ok(OpenAiResponsesBackend::Chat),
+        "anthropic" | "claude" | "anthropic-messages" => Ok(OpenAiResponsesBackend::Anthropic),
+        _ => Err(error::ProxyError::Config(format!(
+            "{RESPONSES_BACKEND_ENV} must be `auto`, `chat`, or `anthropic`, got `{configured}`"
+        ))),
+    }
+}
+
+/// Uses DeepSeek for its native models and Anthropic when rich backend credentials are present.
+fn auto_openai_responses_backend(
+    request: &ir::request::IrRequest,
+    state: &AppState,
+) -> OpenAiResponsesBackend {
+    if is_deepseek_model(&request.model) {
+        return OpenAiResponsesBackend::Chat;
+    }
+
+    if state.anthropic_base_url.is_some()
+        || state.anthropic_auth_token.is_some()
+        || state.anthropic_default_model.is_some()
+    {
+        OpenAiResponsesBackend::Anthropic
+    } else {
+        OpenAiResponsesBackend::Chat
+    }
+}
+
+/// Applies Anthropic-specific defaults before encoding a Responses request for that backend.
+fn apply_responses_anthropic_backend_defaults(
+    request: &mut ir::request::IrRequest,
+    state: &AppState,
+) -> error::Result<()> {
+    if let Some(model) = state.anthropic_default_model.as_deref() {
+        request.model = model.trim().to_owned();
+    }
+    if request.max_tokens.is_none() {
+        request.max_tokens = Some(default_anthropic_max_tokens(state)?);
+    }
+    Ok(())
+}
+
 fn responses_backend_client(state: &AppState) -> error::Result<ResponsesBackendClient> {
     let endpoint = state
         .responses_endpoint
@@ -436,6 +583,43 @@ fn responses_backend_client(state: &AppState) -> error::Result<ResponsesBackendC
         .ok_or_else(|| error::ProxyError::Config(format!("missing {OPENAI_API_KEY_ENV}")))?;
 
     ResponsesBackendClient::with_http_client(state.http_client.clone(), endpoint, api_key)
+}
+
+/// Builds the configured Anthropic Messages backend client used by chain 2.
+fn anthropic_backend_client(state: &AppState) -> error::Result<AnthropicBackendClient> {
+    let base_url = state
+        .anthropic_base_url
+        .as_deref()
+        .ok_or_else(|| error::ProxyError::Config(format!("missing {ANTHROPIC_BASE_URL_ENV}")))?;
+    let api_key = state
+        .anthropic_auth_token
+        .as_deref()
+        .ok_or_else(|| error::ProxyError::Config(format!("missing {ANTHROPIC_AUTH_TOKEN_ENV}")))?;
+    let endpoint = anthropic_messages_endpoint(base_url)?;
+
+    Ok(AnthropicBackendClient::with_http_client(
+        state.http_client.clone(),
+        endpoint,
+        api_key,
+        &state.anthropic_version,
+    )?
+    .with_cache_control_injection(AnthropicCacheControlInjection::EphemeralBreakpoints))
+}
+
+/// Converts an Anthropic base URL into the concrete Messages API endpoint.
+fn anthropic_messages_endpoint(base_url: &str) -> error::Result<String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let endpoint = if trimmed.ends_with("/v1/messages") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}/v1/messages")
+    };
+    reqwest::Url::parse(&endpoint).map_err(|err| {
+        error::ProxyError::Config(format!(
+            "invalid {ANTHROPIC_BASE_URL_ENV} `{base_url}`: {err}"
+        ))
+    })?;
+    Ok(endpoint)
 }
 
 fn upstream_bearer_token<'a>(
@@ -534,6 +718,11 @@ mod tests {
             responses_endpoint: None,
             responses_api_key: None,
             anthropic_messages_backend: None,
+            responses_backend: None,
+            anthropic_base_url: None,
+            anthropic_auth_token: None,
+            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
+            anthropic_default_model: None,
             anthropic_default_max_tokens: None,
         })
     }
@@ -551,6 +740,11 @@ mod tests {
             responses_endpoint: None,
             responses_api_key: None,
             anthropic_messages_backend: None,
+            responses_backend: None,
+            anthropic_base_url: None,
+            anthropic_auth_token: None,
+            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
+            anthropic_default_model: None,
             anthropic_default_max_tokens: anthropic_default_max_tokens.map(ToOwned::to_owned),
         })
     }
@@ -568,6 +762,34 @@ mod tests {
             responses_endpoint: Some(responses_endpoint),
             responses_api_key: responses_api_key.map(ToOwned::to_owned),
             anthropic_messages_backend: anthropic_messages_backend.map(ToOwned::to_owned),
+            responses_backend: None,
+            anthropic_base_url: None,
+            anthropic_auth_token: None,
+            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
+            anthropic_default_model: None,
+            anthropic_default_max_tokens: None,
+        })
+    }
+
+    fn test_app_with_anthropic_backend(
+        anthropic_base_url: String,
+        anthropic_auth_token: Option<&str>,
+        responses_backend: Option<&str>,
+        anthropic_default_model: Option<&str>,
+    ) -> Router {
+        app_with_state(AppState {
+            http_client: reqwest::Client::new(),
+            passthrough_upstream_url: None,
+            chat_completions_url: "http://127.0.0.1:9/chat/completions".to_owned(),
+            chat_api_key: Some("test-backend-key".to_owned()),
+            responses_endpoint: None,
+            responses_api_key: None,
+            anthropic_messages_backend: None,
+            responses_backend: responses_backend.map(ToOwned::to_owned),
+            anthropic_base_url: Some(anthropic_base_url),
+            anthropic_auth_token: anthropic_auth_token.map(ToOwned::to_owned),
+            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
+            anthropic_default_model: anthropic_default_model.map(ToOwned::to_owned),
             anthropic_default_max_tokens: None,
         })
     }
@@ -682,6 +904,25 @@ mod tests {
         }
         body.push_str("data: [DONE]\n\n");
         body
+    }
+
+    /// Formats named JSON events as an Anthropic Messages SSE response.
+    fn anthropic_sse(events: &[(&str, Value)]) -> String {
+        let mut body = String::new();
+        for (event, data) in events {
+            body.push_str("event: ");
+            body.push_str(event);
+            body.push('\n');
+            body.push_str("data: ");
+            body.push_str(&data.to_string());
+            body.push_str("\n\n");
+        }
+        body
+    }
+
+    /// Applies the same Anthropic backend cache-control preparation expected from chain 2.
+    fn anthropic_backend_expected_body(body: Value) -> Value {
+        crate::provider::anthropic_cache::inject_cache_control_breakpoints(body).unwrap()
     }
 
     /// Returns the single Chat Completions JSON request captured by the mock backend.
@@ -1674,6 +1915,541 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_route_round_trips_anthropic_reasoning_signature_to_anthropic_backend() {
+        let upstream = MockServer::start().await;
+        let tool_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        });
+        let source_block = crate::reasoning::envelope::SourceBlock::from_json(
+            ir::message::Provider::Anthropic,
+            &json!({
+                "type": "thinking",
+                "thinking": "Need the weather tool.",
+                "signature": "sig_real_anthropic_1"
+            }),
+        )
+        .unwrap();
+        let gateway_reasoning_item =
+            crate::reasoning::envelope::wrap_as_responses_reasoning_item(&source_block).unwrap();
+        let reasoning_input_item = json!({
+            "type": "reasoning",
+            "summary": [{
+                "type": "summary_text",
+                "text": "Need the weather tool."
+            }],
+            "encrypted_content": gateway_reasoning_item["encrypted_content"].clone()
+        });
+        let first_backend_request = anthropic_backend_expected_body(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 256,
+            "system": [{
+                "type": "text",
+                "text": "Use tools when required."
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "What is the weather in Paris?"
+                }]
+            }],
+            "tools": [{
+                "name": "lookup_weather",
+                "description": "Look up current weather for a city.",
+                "input_schema": tool_schema.clone()
+            }],
+            "tool_choice": { "type": "auto" },
+            "stream": false
+        }));
+        let second_backend_request = anthropic_backend_expected_body(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 256,
+            "system": [{
+                "type": "text",
+                "text": "Use tools when required."
+            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "What is the weather in Paris?"
+                    }]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "Need the weather tool.",
+                            "signature": "sig_real_anthropic_1"
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_weather_1",
+                            "name": "lookup_weather",
+                            "input": { "city": "Paris" }
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_weather_1",
+                            "content": [{
+                                "type": "text",
+                                "text": "sunny and 21C"
+                            }],
+                            "is_error": false
+                        },
+                        {
+                            "type": "text",
+                            "text": "Should I bring an umbrella?"
+                        }
+                    ]
+                }
+            ],
+            "tools": [{
+                "name": "lookup_weather",
+                "description": "Look up current weather for a city.",
+                "input_schema": tool_schema.clone()
+            }],
+            "tool_choice": { "type": "auto" },
+            "stream": false
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .and(header_is("x-api-key", "anthropic-secret"))
+            .and(header_is("anthropic-version", DEFAULT_ANTHROPIC_VERSION))
+            .and(header_is("content-type", "application/json"))
+            .and(body_json(first_backend_request))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_chain2_tool_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-5",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Need the weather tool.",
+                        "signature": "sig_real_anthropic_1"
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_weather_1",
+                        "name": "lookup_weather",
+                        "input": { "city": "Paris" }
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 32,
+                    "output_tokens": 12
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .and(header_is("x-api-key", "anthropic-secret"))
+            .and(header_is("anthropic-version", DEFAULT_ANTHROPIC_VERSION))
+            .and(header_is("content-type", "application/json"))
+            .and(body_json(second_backend_request))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_chain2_final",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-5",
+                "content": [{
+                    "type": "text",
+                    "text": "No umbrella needed."
+                }],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 52,
+                    "output_tokens": 5
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let first_response = post_responses(
+            test_app_with_anthropic_backend(
+                format!("{}/anthropic", upstream.uri()),
+                Some("anthropic-secret"),
+                Some("anthropic"),
+                Some("claude-sonnet-4-5"),
+            ),
+            json!({
+                "model": "gpt-5.5",
+                "instructions": "Use tools when required.",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": "What is the weather in Paris?"
+                }],
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup_weather",
+                    "description": "Look up current weather for a city.",
+                    "parameters": tool_schema
+                }],
+                "tool_choice": "auto",
+                "max_output_tokens": 256,
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let first_body = to_bytes(first_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mut first_body: Value = serde_json::from_slice(&first_body).unwrap();
+        first_body["created_at"] = json!(0);
+        let returned_reasoning = &first_body["output"][0];
+        let returned_source_block =
+            crate::reasoning::envelope::unwrap_from_responses_reasoning_item(returned_reasoning)
+                .unwrap();
+        assert_eq!(
+            returned_source_block.source,
+            ir::message::Provider::Anthropic
+        );
+        assert_eq!(
+            returned_source_block.payload_json().unwrap(),
+            json!({
+                "type": "thinking",
+                "thinking": "Need the weather tool.",
+                "signature": "sig_real_anthropic_1"
+            })
+        );
+        assert_eq!(
+            first_body["output"][1],
+            json!({
+                "id": "fc_msg_chain2_tool_1_1",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "toolu_weather_1",
+                "name": "lookup_weather",
+                "arguments": "{\"city\":\"Paris\"}"
+            })
+        );
+
+        let second_response = post_responses(
+            test_app_with_anthropic_backend(
+                format!("{}/anthropic", upstream.uri()),
+                Some("anthropic-secret"),
+                Some("anthropic"),
+                Some("claude-sonnet-4-5"),
+            ),
+            json!({
+                "model": "gpt-5.5",
+                "instructions": "Use tools when required.",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "What is the weather in Paris?"
+                    },
+                    reasoning_input_item,
+                    {
+                        "type": "function_call",
+                        "call_id": "toolu_weather_1",
+                        "name": "lookup_weather",
+                        "arguments": "{\"city\":\"Paris\"}",
+                        "status": "completed"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "toolu_weather_1",
+                        "output": "sunny and 21C"
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Should I bring an umbrella?"
+                    }
+                ],
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup_weather",
+                    "description": "Look up current weather for a city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        },
+                        "required": ["city"]
+                    }
+                }],
+                "tool_choice": "auto",
+                "max_output_tokens": 256,
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let second_body = to_bytes(second_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mut second_body: Value = serde_json::from_slice(&second_body).unwrap();
+        second_body["created_at"] = json!(0);
+        assert_eq!(second_body["status"], json!("completed"));
+        assert_eq!(
+            second_body["output"],
+            json!([{
+                "id": "msg_msg_chain2_final_0",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "No umbrella needed.",
+                    "annotations": []
+                }]
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_route_streams_anthropic_backend_sse_as_responses_sse() {
+        let upstream = MockServer::start().await;
+        let backend_request = anthropic_backend_expected_body(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 128,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Call the weather tool."
+                }]
+            }],
+            "tools": [{
+                "name": "lookup_weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            }],
+            "tool_choice": { "type": "auto" },
+            "stream": true
+        }));
+        let upstream_sse = anthropic_sse(&[
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_chain2_stream",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-5",
+                        "content": [],
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": {
+                            "input_tokens": 20
+                        }
+                    }
+                }),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "thinking",
+                        "thinking": ""
+                    }
+                }),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": "Need weather."
+                    }
+                }),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": "sig_real_anthropic_stream"
+                    }
+                }),
+            ),
+            (
+                "content_block_stop",
+                json!({
+                    "type": "content_block_stop",
+                    "index": 0
+                }),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_weather_stream",
+                        "name": "lookup_weather",
+                        "input": {}
+                    }
+                }),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": "{\"city\""
+                    }
+                }),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": ":\"Paris\"}"
+                    }
+                }),
+            ),
+            (
+                "content_block_stop",
+                json!({
+                    "type": "content_block_stop",
+                    "index": 1
+                }),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "tool_use",
+                        "stop_sequence": null
+                    },
+                    "usage": {
+                        "output_tokens": 9
+                    }
+                }),
+            ),
+            (
+                "message_stop",
+                json!({
+                    "type": "message_stop"
+                }),
+            ),
+        ]);
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header_is("x-api-key", "anthropic-secret"))
+            .and(header_is("anthropic-version", DEFAULT_ANTHROPIC_VERSION))
+            .and(header_is("content-type", "application/json"))
+            .and(body_json(backend_request))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(upstream_sse),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let response = post_responses(
+            test_app_with_anthropic_backend(
+                format!("{}/v1/messages", upstream.uri()),
+                Some("anthropic-secret"),
+                Some("anthropic"),
+                Some("claude-sonnet-4-5"),
+            ),
+            json!({
+                "model": "gpt-5.5",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": "Call the weather tool."
+                }],
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        },
+                        "required": ["city"]
+                    }
+                }],
+                "tool_choice": "auto",
+                "max_output_tokens": 128,
+                "stream": true
+            }),
+        )
+        .await;
+        let body = responses_sse_body(response).await;
+
+        assert!(body.contains("event: response.created\n"));
+        assert!(body.contains("\"type\":\"response.reasoning_text.delta\""));
+        assert!(body.contains("\"type\":\"response.function_call_arguments.delta\""));
+        assert!(body.contains("\"status\":\"completed\""));
+
+        let mut reasoning_item = None;
+        for line in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if value["type"] == json!("response.output_item.done")
+                && value["output_index"] == json!(0)
+            {
+                reasoning_item = Some(value["item"].clone());
+                break;
+            }
+        }
+        let reasoning_item = reasoning_item.expect("expected completed reasoning item");
+        let source_block =
+            crate::reasoning::envelope::unwrap_from_responses_reasoning_item(&reasoning_item)
+                .unwrap();
+        assert_eq!(source_block.source, ir::message::Provider::Anthropic);
+        assert_eq!(
+            source_block.payload_json().unwrap(),
+            json!({
+                "type": "thinking",
+                "thinking": "Need weather.",
+                "signature": "sig_real_anthropic_stream"
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn responses_route_streams_plain_text_chat_sse_as_responses_snapshot() {
         let upstream = MockServer::start().await;
         let upstream_sse = openai_chat_sse(&[
@@ -1908,6 +2684,11 @@ mod tests {
             responses_endpoint: None,
             responses_api_key: None,
             anthropic_messages_backend: None,
+            responses_backend: None,
+            anthropic_base_url: None,
+            anthropic_auth_token: None,
+            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
+            anthropic_default_model: None,
             anthropic_default_max_tokens: None,
         };
         let mut headers = HeaderMap::new();

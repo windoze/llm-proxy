@@ -99,11 +99,42 @@ fn encode_request_messages(messages: &[Message]) -> Result<Vec<Value>> {
         ));
     }
 
-    messages
+    normalize_request_messages(messages)?
         .iter()
         .enumerate()
         .map(|(index, message)| encode_request_message(message, index))
         .collect()
+}
+
+/// Coalesces adjacent IR messages that Anthropic sees as the same role.
+fn normalize_request_messages(messages: &[Message]) -> Result<Vec<Message>> {
+    let mut normalized: Vec<Message> = Vec::new();
+
+    for (index, message) in messages.iter().enumerate() {
+        let role = match message.role {
+            Role::User | Role::Tool => Role::User,
+            Role::Assistant => Role::Assistant,
+            Role::System => {
+                return Err(mapping_error(format!(
+                    "messages[{index}] has system role, which must be encoded in request.system for Anthropic"
+                )));
+            }
+        };
+
+        if let Some(last) = normalized.last_mut()
+            && last.role == role
+        {
+            last.content.extend(message.content.clone());
+            continue;
+        }
+
+        normalized.push(Message {
+            role,
+            content: message.content.clone(),
+        });
+    }
+
+    Ok(normalized)
 }
 
 fn encode_request_message(message: &Message, index: usize) -> Result<Value> {
@@ -620,6 +651,113 @@ mod tests {
                 "stream": false,
                 "metadata": { "session": "s_1" }
             })
+        );
+    }
+
+    #[test]
+    fn coalesces_adjacent_messages_by_anthropic_role() {
+        let request = IrRequest {
+            model: "claude-sonnet-4-5".to_owned(),
+            system: None,
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "What is the weather in Paris?".to_owned(),
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Thinking(Thinking {
+                        text: Some("Need the weather tool.".to_owned()),
+                        opaque: Some(b"sig_real_anthropic_1".to_vec()),
+                        source: Provider::Anthropic,
+                        echo_policy: EchoPolicy::Always,
+                    })],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_weather_1".to_owned(),
+                        name: "lookup_weather".to_owned(),
+                        input: json!({ "city": "Paris" }),
+                    }],
+                },
+                Message {
+                    role: Role::Tool,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "toolu_weather_1".to_owned(),
+                        content: vec![ContentBlock::Text {
+                            text: "sunny and 21C".to_owned(),
+                        }],
+                        is_error: false,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Should I bring an umbrella?".to_owned(),
+                    }],
+                },
+            ],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_tokens: Some(256),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::new(),
+        };
+
+        let encoded = ir_request_to_anthropic(&request).unwrap();
+
+        assert_eq!(
+            encoded["messages"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "What is the weather in Paris?"
+                    }]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "Need the weather tool.",
+                            "signature": "sig_real_anthropic_1"
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_weather_1",
+                            "name": "lookup_weather",
+                            "input": { "city": "Paris" }
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_weather_1",
+                            "content": [{
+                                "type": "text",
+                                "text": "sunny and 21C"
+                            }],
+                            "is_error": false
+                        },
+                        {
+                            "type": "text",
+                            "text": "Should I bring an umbrella?"
+                        }
+                    ]
+                }
+            ])
         );
     }
 

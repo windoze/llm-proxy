@@ -679,9 +679,16 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 已为 `AnthropicBackendClient` 增加默认关闭的 `AnthropicCacheControlInjection` 开关；M6-07 装配 `/v1/responses` → Anthropic 后端时可显式启用，不引入任何会话状态。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M6-07 `[TODO]` 装配链 2 + 集成测试
+### [DONE] M6-07 装配链 2 + 集成测试
 `/v1/responses` 支持路由到 Anthropic 后端。`wiremock` mock Anthropic（含 thinking+signature），
 测试 Codex 多轮 + tool-use，断言 reasoning 往返后端验签通过。
+
+完成记录：
+- 2026-07-06：已将 `/v1/responses` 装配为可路由到 Anthropic Messages 后端：Responses 请求先解析为 IR，再通过 `ir_request_to_anthropic` 编码为 Anthropic 请求，使用 `AnthropicBackendClient` 调用 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` 配置的上游；非流式响应经 `anthropic_response_to_ir` → Responses response，流式响应经 `parse_reqwest_sse` → `anthropic_sse_to_ir_events` → Responses SSE。
+- 路由选择在 M7 模型路由完成前采用临时安全默认：`deepseek-*` 模型继续走 Chat/DeepSeek，非 DeepSeek 模型在 Anthropic 后端配置存在时走 Anthropic；可用 `LLM_PROXY_RESPONSES_BACKEND=chat|anthropic|auto` 显式覆盖。Anthropic 后端请求启用 M6-06 的无状态 cache-control 注入，并支持 `ANTHROPIC_DEFAULT_OPUS_MODEL` 作为临时模型覆盖。
+- 修复了 Responses/Codex 历史编码到 Anthropic 后端时的相邻同角色消息拆分问题：`ir_request_to_anthropic` 现在会按 Anthropic 目标 role 合并相邻消息，使 reasoning item + function_call 同处 assistant turn、tool_result + 后续用户文本同处 user turn，保证多轮 tool-use 与 thinking signature 回传边界正确。
+- 新增 route-level wiremock 集成测试覆盖 `/v1/responses` → Anthropic 的非流式多轮 tool-use reasoning signature 往返，以及 Anthropic SSE → Responses SSE 的 thinking/signature envelope 与 tool-use 流式输出。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M6-RV `[TODO]` 【Review】M6 链 2 + 全链路
 确认：**Codex 接 Anthropic 后端完成带 reasoning + tool-use 的多轮对话**（PLAN M6 验收）。
