@@ -348,6 +348,133 @@ mod tests {
         })
     }
 
+    /// Posts a Claude Code-style Anthropic Messages request to the in-process router.
+    async fn post_messages(app: Router, body: Value) -> Response {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header(CONTENT_TYPE, "application/json")
+                .header("x-api-key", "client-placeholder")
+                .header("anthropic-version", "2023-06-01")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Reads a successful Anthropic SSE response body for snapshot assertions.
+    async fn anthropic_sse_body(response: Response) -> String {
+        let status = response.status();
+        let content_type = response.headers().get(CONTENT_TYPE).cloned();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert_eq!(status, StatusCode::OK, "unexpected response body: {body}");
+        assert_eq!(content_type.as_ref().unwrap(), "text/event-stream");
+
+        body
+    }
+
+    /// Formats JSON stream chunks as an OpenAI Chat SSE response with the final `[DONE]` marker.
+    fn openai_chat_sse(chunks: &[Value]) -> String {
+        let mut body = String::new();
+        for chunk in chunks {
+            body.push_str("data: ");
+            body.push_str(&chunk.to_string());
+            body.push_str("\n\n");
+        }
+        body.push_str("data: [DONE]\n\n");
+        body
+    }
+
+    /// Returns the single Chat Completions JSON request captured by the mock backend.
+    async fn recorded_chat_request(upstream: &MockServer) -> Value {
+        let requests = upstream.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "expected one upstream request");
+        let request = &requests[0];
+        assert_eq!(request.method.as_str(), "POST");
+        assert_eq!(request.url.path(), "/chat/completions");
+        request.body_json().unwrap()
+    }
+
+    /// Recorded Claude Code-style text-only request sample for the Anthropic Messages route.
+    fn claude_code_plain_text_request() -> Value {
+        json!({
+            "model": "deepseek-chat",
+            "system": "You are Claude Code. Answer concisely.",
+            "messages": [{
+                "role": "user",
+                "content": "Say hello from the proxy."
+            }],
+            "max_tokens": 64,
+            "stream": true
+        })
+    }
+
+    /// Recorded Claude Code-style reasoning request sample for DeepSeek reasoner streaming.
+    fn claude_code_reasoning_request() -> Value {
+        json!({
+            "model": "deepseek-reasoner",
+            "messages": [{
+                "role": "user",
+                "content": "Think briefly before answering."
+            }],
+            "max_tokens": 128,
+            "stream": true
+        })
+    }
+
+    /// Recorded Claude Code-style multi-turn tool-use request sample.
+    fn claude_code_tool_use_request() -> Value {
+        json!({
+            "model": "deepseek-chat",
+            "system": "Use tools when required.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is the weather in Paris?"
+                },
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_weather_1",
+                        "name": "lookup_weather",
+                        "input": { "city": "Paris" }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_weather_1",
+                        "content": "sunny and 21C"
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": "Should I bring an umbrella?"
+                }
+            ],
+            "tools": [{
+                "name": "lookup_weather",
+                "description": "Look up current weather for a city.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            }],
+            "tool_choice": { "type": "auto" },
+            "max_tokens": 256,
+            "stream": true
+        })
+    }
+
     #[tokio::test]
     async fn health_route_returns_ok_json() {
         let response = app()
@@ -525,6 +652,296 @@ mod tests {
                     "output_tokens": 4
                 }
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_route_streams_plain_text_chat_sse_as_anthropic_snapshot() {
+        let upstream = MockServer::start().await;
+        let upstream_sse = openai_chat_sse(&[
+            json!({
+                "id": "chatcmpl_text",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "role": "assistant" },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_text",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": "Hello from" },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_text",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": " the proxy." },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 5
+                }
+            }),
+        ]);
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(upstream_sse),
+            )
+            .mount(&upstream)
+            .await;
+
+        let response = post_messages(
+            test_app_with_chat_backend(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+            ),
+            claude_code_plain_text_request(),
+        )
+        .await;
+        assert_eq!(
+            recorded_chat_request(&upstream).await,
+            json!({
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are Claude Code. Answer concisely."
+                    },
+                    {
+                        "role": "user",
+                        "content": "Say hello from the proxy."
+                    }
+                ],
+                "max_tokens": 64,
+                "stream": true
+            })
+        );
+
+        insta::assert_snapshot!(
+            "messages_route_plain_text_anthropic_sse",
+            anthropic_sse_body(response).await
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_route_streams_reasoning_chat_sse_as_anthropic_snapshot() {
+        let upstream = MockServer::start().await;
+        let upstream_sse = openai_chat_sse(&[
+            json!({
+                "id": "chatcmpl_reasoning",
+                "model": "deepseek-reasoner",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "role": "assistant" },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_reasoning",
+                "model": "deepseek-reasoner",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "reasoning_content": "I should answer directly." },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_reasoning",
+                "model": "deepseek-reasoner",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": "Done." },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 3
+                }
+            }),
+        ]);
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(upstream_sse),
+            )
+            .mount(&upstream)
+            .await;
+
+        let response = post_messages(
+            test_app_with_chat_backend(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+            ),
+            claude_code_reasoning_request(),
+        )
+        .await;
+        assert_eq!(
+            recorded_chat_request(&upstream).await,
+            json!({
+                "model": "deepseek-reasoner",
+                "messages": [{
+                    "role": "user",
+                    "content": "Think briefly before answering."
+                }],
+                "max_tokens": 128,
+                "stream": true
+            })
+        );
+
+        insta::assert_snapshot!(
+            "messages_route_reasoning_anthropic_sse",
+            anthropic_sse_body(response).await
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_route_streams_tool_use_multiturn_chat_sse_as_anthropic_snapshot() {
+        let upstream = MockServer::start().await;
+        let upstream_sse = openai_chat_sse(&[
+            json!({
+                "id": "chatcmpl_tool",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "role": "assistant" },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_tool",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "toolu_weather_2",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "arguments": "{\"city\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_tool",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": ":\"Paris\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 38,
+                    "completion_tokens": 7
+                }
+            }),
+        ]);
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(upstream_sse),
+            )
+            .mount(&upstream)
+            .await;
+
+        let response = post_messages(
+            test_app_with_chat_backend(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+            ),
+            claude_code_tool_use_request(),
+        )
+        .await;
+        assert_eq!(
+            recorded_chat_request(&upstream).await,
+            json!({
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Use tools when required."
+                    },
+                    {
+                        "role": "user",
+                        "content": "What is the weather in Paris?"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "toolu_weather_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "arguments": "{\"city\":\"Paris\"}"
+                            }
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "toolu_weather_1",
+                        "content": "sunny and 21C"
+                    },
+                    {
+                        "role": "user",
+                        "content": "Should I bring an umbrella?"
+                    }
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_weather",
+                        "description": "Look up current weather for a city.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": { "type": "string" }
+                            },
+                            "required": ["city"]
+                        }
+                    }
+                }],
+                "tool_choice": "auto",
+                "max_tokens": 256,
+                "stream": true
+            })
+        );
+
+        insta::assert_snapshot!(
+            "messages_route_tool_use_multiturn_anthropic_sse",
+            anthropic_sse_body(response).await
         );
     }
 

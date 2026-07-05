@@ -337,9 +337,14 @@ IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处
 - 新增 route 测试覆盖 system prompt hoist、默认 `max_tokens`、后端 Authorization Bearer 翻译、非流式响应编码、流式 SSE 转换与缺少后端 API key 的配置错误。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-09 `[TODO]` 链 3 集成测试
+### [DONE] M2-09 链 3 集成测试
 用 `wiremock` mock DeepSeek 后端，录制的 Claude Code 请求样本打到 `/v1/messages`，
 用 `insta` 快照比对流式输出的 Anthropic SSE 序列。覆盖：纯文本、reasoning、带 tool-use 的多轮。
+
+完成记录：
+- 2026-07-06：已为 `POST /v1/messages` 增加 `wiremock` DeepSeek mock 集成测试样本，覆盖 Claude Code-style 纯文本、DeepSeek reasoning、以及带历史 tool_use/tool_result 的多轮 tool-use 请求。
+- 新增 `insta` 快照比对完整 Anthropic SSE 事件序列，锁定 `message_start`、content block start/delta/stop、`message_delta` usage/stop_reason、`message_stop`，并对上游 Chat 请求 JSON 做 recorded-request 断言。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-RV `[TODO]` 【Review】M2 链 3 + 真实联调
 确认：**真实 Claude Code 指向本网关 + DeepSeek 后端，完成一次带工具调用的多轮对话**（PLAN M2 验收）。

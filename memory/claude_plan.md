@@ -1,14 +1,30 @@
-# Execution Plan
+## Execution Plan
 
-Current task: `[DONE] M2-08 装配链 3 端到端路由`.
+I will follow `TODO.md` as the authoritative task list and complete exactly the first task whose heading is not prefixed with `[DONE]`.
 
-1. Confirm whether the latest commit mentions unfinished work directly relevant to `M2-08`.
-2. Inspect the current router, config, provider profiles, Anthropic decoder/encoder, Chat encoder/stream decoder, SSE helpers, and existing route tests.
-3. Add `POST /v1/messages` so Anthropic requests are decoded to IR, encoded as Chat/DeepSeek requests, sent to the configured Chat-compatible upstream, and returned as Anthropic non-streaming or streaming responses.
-4. Implement required `x-api-key` to upstream authorization handling, preserve required Anthropic response headers, apply a reasonable Chat-side default when Anthropic `max_tokens` is absent, and keep system prompt handling through the existing IR path.
-5. Add focused unit tests for non-streaming route behavior, streaming SSE conversion, auth/header translation, and default handling.
-6. Run formatting, linting, and tests in order; address any observed unscheduled failures.
-7. Mark `M2-08` `[DONE]` in `TODO.md` with a completion record.
-8. Commit all task-related changes with the required co-author trailer and stop.
+1. Read `TODO.md` to identify the first incomplete task and its validation requirements.
+2. Inspect the immediately relevant project files and recent commit context only as needed for that task.
+3. Implement the task as specified, without narrowing scope or using workarounds.
+4. Run formatting, linting, and the relevant/full test suite according to the task requirements and repository conventions.
+5. If validation exposes an unscheduled failure, fix it if in scope or add the minimum prerequisite task to `TODO.md` before the blocked task, then stop.
+6. Mark the completed task heading with `[DONE]`, update its completion record, and update this file with key progress.
+7. Commit all resulting changes for this task with a descriptive message and stop without starting the next task.
 
-Status: Completed `POST /v1/messages` for chain 3, including Anthropic request decoding, default `max_tokens`, DeepSeek Chat request encoding, upstream authorization handling, non-streaming response conversion, streaming Chat SSE to Anthropic SSE conversion, and focused route tests. `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` passed.
+## Current Task
+
+Selected first incomplete task: `M2-09 [TODO] 链 3 集成测试`.
+
+Task-specific plan:
+
+1. Reuse the existing `/v1/messages` route test harness with `wiremock` DeepSeek mocks.
+2. Add recorded Claude Code-style Anthropic request samples for streaming plain text, reasoning, and multi-turn tool-use histories.
+3. Snapshot the full Anthropic SSE frame sequence with `insta` instead of checking only substring fragments.
+4. Keep existing non-streaming/configuration route coverage intact.
+5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. Mark `M2-09` as `[DONE]`, update its completion record, then commit the task changes.
+
+Progress:
+
+- Added route-level fixtures/helpers and three `wiremock` + `insta` streaming snapshot cases for text, reasoning, and multi-turn tool-use coverage.
+- Ran baseline and final validation successfully: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+- Marked `M2-09` as `[DONE]` in `TODO.md` with completion notes.
