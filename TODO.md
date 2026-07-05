@@ -163,7 +163,7 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - 新增单元测试覆盖 `GenericOpenAi` 中性默认行为与自定义 base URL。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M1-05 `[TODO]` 实现 DeepSeek profile (`provider/deepseek.rs`)
+### [DONE] M1-05 实现 DeepSeek profile (`provider/deepseek.rs`)
 实现 `CapabilityProfile`，严格按 DESIGN §5：
 - `param_blocklist`: `["temperature","top_p","presence_penalty","frequency_penalty","logprobs","top_logprobs"]`
 - `normalize_reasoning_effort`: `low|medium -> high`, `xhigh -> max`, 默认 `high`
@@ -172,6 +172,12 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - `thinking_model`: `model == "deepseek-reasoner"`（`deepseek-chat` 为 false）
 - `base_url`: `https://api.deepseek.com`
 在代码注释标注 DESIGN §5 的"官方文档版本不一致"警告，说明以 `thinking_mode` 新页为准。
+
+完成记录：
+- 2026-07-06：已新增 `src/provider/deepseek.rs` 并在 `src/provider/mod.rs` 暴露 `provider::deepseek` 模块。
+- 已实现 DeepSeek `CapabilityProfile`：按 DESIGN §5 静默 drop 不支持参数、归一 `reasoning_effort`、使用 `EchoPolicy::OnlyWithToolCall`、禁用 `n>1`、仅 `deepseek-reasoner` 启用 thinking、base URL 为 `https://api.deepseek.com`，模型名保持原样。
+- 已在代码注释中标注 DeepSeek 官方文档版本不一致，并说明以 `thinking_mode` 新页规则为准；新增单元测试覆盖每条 profile 规则。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M1-06 `[TODO]` OpenAI Chat/DeepSeek 请求解析 (`protocol/openai_chat/decode.rs`)
 实现 `chat_request_to_ir(body:&Value, profile:&dyn CapabilityProfile) -> Result<IrRequest>`：
