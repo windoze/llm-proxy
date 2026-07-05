@@ -14,6 +14,7 @@ use crate::{
         request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
     protocol::tool_ids::{ToolIdMap, responses_tool_id_map_from_request},
+    reasoning::envelope::{SourceBlock, wrap_as_responses_reasoning_item},
 };
 
 use super::reasoning::preserved_reasoning_item_from_thinking;
@@ -608,6 +609,10 @@ fn encode_reasoning_item(
         return Ok(Value::Object(item));
     }
 
+    if thinking.source == Provider::Anthropic {
+        return encode_anthropic_reasoning_item(output_index, thinking, status);
+    }
+
     let mut item = Map::new();
     item.insert(
         "id".to_owned(),
@@ -628,6 +633,49 @@ fn encode_reasoning_item(
     }
 
     Ok(Value::Object(item))
+}
+
+fn encode_anthropic_reasoning_item(
+    output_index: usize,
+    thinking: &Thinking,
+    status: &str,
+) -> Result<Value> {
+    let path = format!("output[{output_index}]");
+    let source_block = anthropic_source_block_from_thinking(thinking, &path)?;
+    let mut item = wrap_as_responses_reasoning_item(&source_block)?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| mapping_error("Responses reasoning envelope item must be an object"))?;
+
+    item.insert("status".to_owned(), json!(status));
+    item.insert("summary".to_owned(), encode_reasoning_summary(thinking));
+
+    Ok(Value::Object(item))
+}
+
+fn anthropic_source_block_from_thinking(thinking: &Thinking, path: &str) -> Result<SourceBlock> {
+    let text = thinking
+        .text
+        .as_deref()
+        .ok_or_else(|| mapping_error(format!("{path}.thinking text is required")))?;
+    let signature = thinking
+        .opaque
+        .as_deref()
+        .ok_or_else(|| mapping_error(format!("{path}.opaque Anthropic signature is required")))?;
+    let signature = std::str::from_utf8(signature).map_err(|err| {
+        mapping_error(format!(
+            "{path}.opaque Anthropic signature must be valid UTF-8: {err}"
+        ))
+    })?;
+
+    SourceBlock::from_json(
+        Provider::Anthropic,
+        &json!({
+            "type": "thinking",
+            "thinking": text,
+            "signature": signature,
+        }),
+    )
 }
 
 fn reasoning_encrypted_content_from_opaque(
@@ -1163,6 +1211,82 @@ mod tests {
         assert_eq!(encoded["output"][0]["id"], "rs_completed");
         assert_eq!(encoded["output"][0]["status"], "completed");
         assert_eq!(encoded["output"][0]["encrypted_content"], "enc_preserved");
+    }
+
+    #[test]
+    fn wraps_anthropic_thinking_as_responses_reasoning_envelope() {
+        let response = IrResponse {
+            id: "resp_anthropic".to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+            content: vec![ContentBlock::Thinking(Thinking {
+                text: Some("Need the weather tool.".to_owned()),
+                opaque: Some(b"sig_real_anthropic_123".to_vec()),
+                source: Provider::Anthropic,
+                echo_policy: EchoPolicy::Always,
+            })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 12,
+                output_tokens: 4,
+                cache_read: None,
+                cache_write: None,
+            },
+        };
+
+        let encoded = ir_response_to_responses(&response).unwrap();
+        let item = &encoded["output"][0];
+
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["status"], "completed");
+        assert_eq!(
+            item["summary"],
+            json!([{ "type": "summary_text", "text": "Need the weather tool." }])
+        );
+        assert!(
+            item["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("rs_llm_proxy"))
+        );
+        assert_ne!(item["encrypted_content"], "sig_real_anthropic_123");
+
+        let source_block =
+            crate::reasoning::envelope::unwrap_from_responses_reasoning_item(item).unwrap();
+        assert_eq!(source_block.source, Provider::Anthropic);
+        assert_eq!(
+            source_block.payload_json().unwrap(),
+            json!({
+                "type": "thinking",
+                "thinking": "Need the weather tool.",
+                "signature": "sig_real_anthropic_123"
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_anthropic_thinking_without_signature_for_responses_envelope() {
+        let response = IrResponse {
+            id: "resp_missing_signature".to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+            content: vec![ContentBlock::Thinking(Thinking {
+                text: Some("Need the weather tool.".to_owned()),
+                opaque: None,
+                source: Provider::Anthropic,
+                echo_policy: EchoPolicy::Always,
+            })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 12,
+                output_tokens: 4,
+                cache_read: None,
+                cache_write: None,
+            },
+        };
+
+        let error = ir_response_to_responses(&response).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message.contains("Anthropic signature is required"))
+        );
     }
 
     #[test]

@@ -13,13 +13,12 @@ I will not record private chain-of-thought, but I will keep this file updated wi
 
 ## Progress
 
-- Started invocation and reset this progress file for the current run.
-- Identified first incomplete task: `M6-02` — Anthropic response to IR for thinking blocks.
-- Latest commit is `[M6-01] Add Anthropic backend client`; it does not mention unfinished work that changes this task ordering.
-- Inspected existing Anthropic request decoder/response encoder, Responses stream decoder, IR event definitions, and streaming module exports.
-- Confirmed `stream/anthropic_decoder.rs` does not exist yet, so this task requires adding it rather than only reusing an existing module.
-- Implemented `anthropic_response_to_ir` for non-streaming Anthropic Messages responses, including thinking signature preservation as Anthropic-origin opaque bytes.
-- Added `stream::anthropic_decoder` for Anthropic SSE → IR events, including `thinking_delta` and `signature_delta` preservation as `ThinkingMetadata`.
-- Added tests covering non-streaming and streaming Anthropic thinking signature handling and missing-signature errors.
+- Started invocation and refreshed this progress file for the current run.
+- Identified first incomplete task: `M6-03` — IR Anthropic thinking to Responses reasoning item via envelope encoding.
+- Latest commit is `[M6-02] Decode Anthropic thinking responses`; it is directly relevant as the preceding decoder work, but it does not mention unfinished work that changes task ordering.
+- Inspected the existing Responses encoder, M4 envelope helpers, Anthropic thinking decoder, and Responses streaming encoder behavior.
+- Implemented the non-streaming Responses response path for `Thinking{source: Anthropic}`: it now wraps a serialized Anthropic thinking block containing text plus the true signature into a Responses-compatible reasoning item `encrypted_content`.
+- Added focused tests for the envelope payload and for rejecting Anthropic-origin thinking without a signature.
 - Validation passed: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked `M6-02` as `[DONE]` in `TODO.md` with a completion record.
+- Marked `M6-03` as `[DONE]` in `TODO.md` with a completion record.
+- Final diff inspected; committing the task changes next.
