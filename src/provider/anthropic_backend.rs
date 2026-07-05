@@ -5,7 +5,12 @@
 
 use serde_json::Value;
 
-use crate::error::{ProxyError, Result};
+use crate::{
+    error::{ProxyError, Result},
+    provider::anthropic_cache::{
+        AnthropicCacheControlInjection, prepare_anthropic_request_body_with_cache_control,
+    },
+};
 
 const X_API_KEY_HEADER: &str = "x-api-key";
 const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
@@ -17,6 +22,7 @@ pub struct AnthropicBackendClient {
     endpoint: reqwest::Url,
     api_key: String,
     anthropic_version: String,
+    cache_control: AnthropicCacheControlInjection,
 }
 
 impl AnthropicBackendClient {
@@ -62,12 +68,22 @@ impl AnthropicBackendClient {
             endpoint,
             api_key: api_key.to_owned(),
             anthropic_version: anthropic_version.to_owned(),
+            cache_control: AnthropicCacheControlInjection::Disabled,
         })
+    }
+
+    /// Enables or disables stateless Anthropic prompt-cache breakpoint injection.
+    pub fn with_cache_control_injection(
+        mut self,
+        cache_control: AnthropicCacheControlInjection,
+    ) -> Self {
+        self.cache_control = cache_control;
+        self
     }
 
     /// Sends an Anthropic request and leaves the response body available as `bytes_stream()`.
     pub async fn send(&self, body: Value) -> Result<reqwest::Response> {
-        let body = prepare_anthropic_request_body(body)?;
+        let body = prepare_anthropic_request_body_with_cache_control(body, self.cache_control)?;
         let response = self
             .http_client
             .post(self.endpoint.clone())
@@ -91,17 +107,6 @@ impl AnthropicBackendClient {
     }
 }
 
-/// Validates the outgoing Anthropic request body without changing provider-specific fields.
-pub fn prepare_anthropic_request_body(body: Value) -> Result<Value> {
-    if !body.is_object() {
-        return Err(ProxyError::ProtocolMapping(
-            "Anthropic backend request body must be a JSON object".to_owned(),
-        ));
-    }
-
-    Ok(body)
-}
-
 async fn ensure_upstream_success(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
@@ -122,38 +127,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[test]
-    fn preserves_json_object_request_body() {
-        let body = json!({
-            "model": "claude-sonnet-4-5",
-            "max_tokens": 128,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "hello"
-                }
-            ],
-            "thinking": {
-                "type": "enabled",
-                "budget_tokens": 1024
-            }
-        });
-
-        assert_eq!(prepare_anthropic_request_body(body.clone()).unwrap(), body);
-    }
-
-    #[test]
-    fn rejects_non_object_request_body() {
-        let err = prepare_anthropic_request_body(json!("not an object")).unwrap_err();
-
-        match err {
-            ProxyError::ProtocolMapping(message) => {
-                assert!(message.contains("request body must be a JSON object"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    }
 
     #[test]
     fn rejects_invalid_endpoint_url() {
@@ -264,6 +237,86 @@ mod tests {
                 ],
                 "stream": true
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn client_can_enable_cache_control_injection() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header(X_API_KEY_HEADER, "test-anthropic-key"))
+            .and(header(ANTHROPIC_VERSION_HEADER, "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-5",
+                "content": [],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let client = AnthropicBackendClient::new(
+            format!("{}/v1/messages", upstream.uri()),
+            "test-anthropic-key",
+            "2023-06-01",
+        )
+        .unwrap()
+        .with_cache_control_injection(AnthropicCacheControlInjection::EphemeralBreakpoints);
+
+        client
+            .send(json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 128,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "first turn"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [{
+                            "type": "text",
+                            "text": "assistant turn"
+                        }]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "latest turn"
+                        }]
+                    }
+                ]
+            }))
+            .await
+            .unwrap();
+
+        let requests = upstream.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request_body: Value = requests[0].body_json().unwrap();
+        assert_eq!(
+            request_body["messages"][0]["content"],
+            json!([{
+                "type": "text",
+                "text": "first turn",
+                "cache_control": { "type": "ephemeral" }
+            }])
+        );
+        assert_eq!(
+            request_body["messages"][1]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            request_body["messages"][2]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
         );
     }
 

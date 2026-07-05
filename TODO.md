@@ -670,8 +670,14 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 新增 targeted 单元测试覆盖 Responses SSE encoder 的 Anthropic reasoning envelope，以及完整 Anthropic SSE → IR event → Responses SSE 桥接，断言 tool call arguments、usage、block index 与 envelope payload 保真。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M6-06 `[TODO]` 可选：Anthropic 后端 cache_control 注入
+### [DONE] M6-06 可选：Anthropic 后端 cache_control 注入
 纯函数从消息结构算 cache 断点，注入 Anthropic 请求省钱（DESIGN §3.1）。无状态。可作为可配置开关。
+
+完成记录：
+- 2026-07-06：已新增 `provider::anthropic_cache` 无状态 `cache_control` 注入模块，按 Anthropic prompt 顺序从 `tools` → `system` → `messages` 收集可缓存块，并为最近的最多 4 个可缓存断点注入 `{"type":"ephemeral"}`。
+- 注入逻辑会跳过不可直接缓存的 `thinking` block 与空 text block，保留既有 `cache_control`，对字符串形式的 system/message content 做等价 text block 转换，并在已有断点超过 Anthropic 上限时明确报错。
+- 已为 `AnthropicBackendClient` 增加默认关闭的 `AnthropicCacheControlInjection` 开关；M6-07 装配 `/v1/responses` → Anthropic 后端时可显式启用，不引入任何会话状态。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M6-07 `[TODO]` 装配链 2 + 集成测试
 `/v1/responses` 支持路由到 Anthropic 后端。`wiremock` mock Anthropic（含 thinking+signature），

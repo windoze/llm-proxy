@@ -1,23 +1,33 @@
-# Execution plan
+# Execution Plan
 
-I will complete exactly the first incomplete task listed in `TODO.md`, using `TODO.md` as the source of truth for ordering, requirements, dependencies, validation, and completion records.
-
-## Step-by-step plan
+I will follow the repository task order without doing broad issue triage first. I will:
 
 1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Check the latest commit message only for unfinished work that is directly relevant to that selected task.
-3. Read the selected task details and any immediately relevant project files needed to implement it.
-4. Implement the task as written, without narrowing scope or using workarounds.
-5. Run formatting, linting, and tests required by the task and repository conventions, addressing any unscheduled failures that appear.
-6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and filling in its completion record. Update `PLAN.md` only if phase-level sequencing or criteria actually change.
-7. Commit all changes for this task with a descriptive message and the required co-author trailer.
-8. Stop after this single task is completed and committed.
+2. Check the latest commit message only for unfinished work directly relevant to that selected task.
+3. Inspect the files and tests that the selected task references.
+4. Implement the task fully, or add the minimum prerequisite task to `TODO.md` if a concrete blocker makes completion impossible.
+5. Run formatting, linting, and relevant tests in the required order, expanding to the full suite if code changes require it.
+6. Update this file at major milestones, update `TODO.md` with the completion record and `[DONE]` prefix if the task is completed, and avoid routine `PLAN.md` changes unless phase-level planning changes.
+7. Commit all resulting changes with a descriptive message and then stop.
 
-## Progress log
+## Current Task
 
-- Created the initial execution plan before running repository inspection or implementation commands.
-- Identified the first incomplete task as `M6-05`: implement Anthropic SSE -> IR event -> Responses SSE rich-to-rich streaming with aligned indexes and block types.
-- Completed baseline validation before code changes: formatting check, clippy, and the full test suite passed.
-- Current implementation focus: ensure streaming Anthropic thinking metadata is encoded into Responses `encrypted_content` as a full Anthropic thinking block envelope, then add end-to-end stream bridge coverage.
-- Implemented the streaming envelope fix and added targeted tests for both the Responses SSE encoder and the full Anthropic SSE -> IR -> Responses SSE bridge. Targeted tests passed.
-- Full validation passed after the implementation. `TODO.md` now marks `M6-05` as `[DONE]` with a completion record.
+Selected task: `M6-06` — optional stateless Anthropic backend `cache_control` injection.
+
+Planned execution:
+
+1. Read DESIGN §3.1 and the current Anthropic request encoding/backend route code.
+2. Add a pure, opt-in helper that computes safe Anthropic cache breakpoints from the encoded message structure and injects `cache_control` blocks without storing state.
+3. Wire the helper behind an explicit backend-client switch so M6-07 can enable it when assembling the Anthropic route.
+4. Add focused tests for disabled-by-default behavior, injection placement, idempotence, and backend-client request preparation.
+5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. Mark `M6-06` done in `TODO.md`, update this progress file, commit, and stop.
+
+Progress:
+
+- Identified `M6-06` as the first incomplete task.
+- Confirmed the previous commit completed `M6-05` and did not name unfinished work that changes this task.
+- Added the stateless Anthropic cache-control injection module and backend-client opt-in switch.
+- Added tests for breakpoint selection, string content conversion, idempotence, over-limit errors, and the client switch.
+- Completed the required formatting, linting, and full test-suite validation.
+- Marked `M6-06` as `[DONE]` in `TODO.md`.
