@@ -478,6 +478,34 @@ mod tests {
         body
     }
 
+    /// Reads a Responses SSE body and normalizes dynamic timestamps for snapshots.
+    async fn responses_sse_snapshot_body(response: Response) -> String {
+        normalize_created_at_fields(responses_sse_body(response).await)
+    }
+
+    /// Replaces dynamic Responses `created_at` values while preserving SSE and JSON field order.
+    fn normalize_created_at_fields(body: String) -> String {
+        let marker = "\"created_at\":";
+        let mut normalized = String::with_capacity(body.len());
+        let mut cursor = 0;
+
+        while let Some(relative_start) = body[cursor..].find(marker) {
+            let marker_start = cursor + relative_start;
+            let value_start = marker_start + marker.len();
+            normalized.push_str(&body[cursor..value_start]);
+
+            let value_end = value_start
+                + body[value_start..]
+                    .find(|character: char| !character.is_ascii_digit())
+                    .unwrap_or(body.len() - value_start);
+            normalized.push('0');
+            cursor = value_end;
+        }
+
+        normalized.push_str(&body[cursor..]);
+        normalized
+    }
+
     /// Formats JSON stream chunks as an OpenAI Chat SSE response with the final `[DONE]` marker.
     fn openai_chat_sse(chunks: &[Value]) -> String {
         let mut body = String::new();
@@ -941,6 +969,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_route_streams_plain_text_chat_sse_as_responses_snapshot() {
+        let upstream = MockServer::start().await;
+        let upstream_sse = openai_chat_sse(&[
+            json!({
+                "id": "chatcmpl_responses_text",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "role": "assistant" },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_responses_text",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": "Hello from" },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_responses_text",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": " the proxy." },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 5
+                }
+            }),
+        ]);
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(upstream_sse),
+            )
+            .mount(&upstream)
+            .await;
+
+        let response = post_responses(
+            test_app_with_chat_backend(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+            ),
+            codex_plain_text_request(true),
+        )
+        .await;
+        assert_eq!(
+            recorded_chat_request(&upstream).await,
+            json!({
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You are Codex. Answer concisely."
+                            },
+                            {
+                                "type": "text",
+                                "text": "Prefer direct answers."
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": "Say hello from the proxy."
+                    }
+                ],
+                "max_tokens": 64,
+                "stream": true,
+                "reasoning_effort": "high"
+            })
+        );
+
+        insta::assert_snapshot!(
+            "responses_route_plain_text_sse",
+            responses_sse_snapshot_body(response).await
+        );
+    }
+
+    #[tokio::test]
     async fn responses_route_streams_tool_use_chat_sse_as_responses_sse() {
         let upstream = MockServer::start().await;
         let upstream_sse = openai_chat_sse(&[
@@ -1068,16 +1187,10 @@ mod tests {
             })
         );
 
-        let body = responses_sse_body(response).await;
-        assert!(body.contains("event: response.created\n"));
-        assert!(body.contains("event: response.output_item.added\n"));
-        assert!(body.contains("event: response.function_call_arguments.delta\n"));
-        assert!(body.contains("event: response.function_call_arguments.done\n"));
-        assert!(body.contains("\"call_id\":\"call_weather_2\""));
-        assert!(body.contains("\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\""));
-        assert!(body.contains("\"status\":\"completed\""));
-        assert!(body.contains("\"usage\":{\"input_tokens\":38"));
-        assert!(body.contains("event: response.completed\n"));
+        insta::assert_snapshot!(
+            "responses_route_tool_use_multiturn_sse",
+            responses_sse_snapshot_body(response).await
+        );
     }
 
     #[test]

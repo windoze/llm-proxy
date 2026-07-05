@@ -1,0 +1,27 @@
+---
+source: src/main.rs
+expression: responses_sse_snapshot_body(response).await
+---
+event: response.created
+data: {"response":{"created_at":0,"error":null,"id":"chatcmpl_responses_tool","incomplete_details":null,"model":"deepseek-chat","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"status":"in_progress","store":false,"usage":null},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"created_at":0,"error":null,"id":"chatcmpl_responses_tool","incomplete_details":null,"model":"deepseek-chat","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"status":"in_progress","store":false,"usage":null},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_weather_2","id":"fc_chatcmpl_responses_tool_0","name":"lookup_weather","status":"in_progress","type":"function_call"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"city\"","item_id":"fc_chatcmpl_responses_tool_0","output_index":0,"sequence_number":3,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":":\"Paris\"}","item_id":"fc_chatcmpl_responses_tool_0","output_index":0,"sequence_number":4,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"city\":\"Paris\"}","item_id":"fc_chatcmpl_responses_tool_0","name":"lookup_weather","output_index":0,"sequence_number":5,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"city\":\"Paris\"}","call_id":"call_weather_2","id":"fc_chatcmpl_responses_tool_0","name":"lookup_weather","status":"completed","type":"function_call"},"output_index":0,"sequence_number":6,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"created_at":0,"error":null,"id":"chatcmpl_responses_tool","incomplete_details":null,"model":"deepseek-chat","object":"response","output":[{"arguments":"{\"city\":\"Paris\"}","call_id":"call_weather_2","id":"fc_chatcmpl_responses_tool_0","name":"lookup_weather","status":"completed","type":"function_call"}],"parallel_tool_calls":true,"previous_response_id":null,"status":"completed","store":false,"usage":{"input_tokens":38,"input_tokens_details":{"cached_tokens":0},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":45}},"sequence_number":7,"type":"response.completed"}
