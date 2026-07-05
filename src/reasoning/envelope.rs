@@ -6,7 +6,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{
     error::{ProxyError, Result},
@@ -15,6 +15,8 @@ use crate::{
 
 const ENVELOPE_VERSION: u8 = 1;
 const CHECKSUM_DOMAIN: &[u8] = b"llm-proxy.reasoning-envelope";
+const RESPONSES_REASONING_TYPE: &str = "reasoning";
+const RESPONSES_REASONING_ID_PREFIX: &str = "rs_llm_proxy";
 
 /// Serialized reasoning block plus the provider that can interpret it later.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,9 +92,7 @@ impl Envelope {
 /// Encodes a provider source block into a base64 JSON envelope.
 pub fn wrap(source_block: &SourceBlock) -> Result<String> {
     let envelope = Envelope::new(source_block);
-    let bytes = serde_json::to_vec(&envelope)?;
-
-    Ok(STANDARD.encode(bytes))
+    encode_envelope(&envelope)
 }
 
 /// Decodes and verifies a base64 envelope, returning the original provider payload bytes.
@@ -104,6 +104,74 @@ pub fn unwrap(encoded: &str) -> Result<SourceBlock> {
         .map_err(|err| mapping_error(format!("reasoning envelope is not valid JSON: {err}")))?;
 
     envelope.into_source_block()
+}
+
+/// Wraps a source block as a Responses-compatible reasoning item.
+pub fn wrap_as_responses_reasoning_item(source_block: &SourceBlock) -> Result<Value> {
+    let envelope = Envelope::new(source_block);
+    let encrypted_content = encode_envelope(&envelope)?;
+
+    let mut item = Map::new();
+    item.insert(
+        "id".to_owned(),
+        Value::String(responses_reasoning_item_id(&envelope)),
+    );
+    item.insert(
+        "type".to_owned(),
+        Value::String(RESPONSES_REASONING_TYPE.to_owned()),
+    );
+    item.insert("summary".to_owned(), Value::Array(Vec::new()));
+    item.insert(
+        "encrypted_content".to_owned(),
+        Value::String(encrypted_content),
+    );
+
+    Ok(Value::Object(item))
+}
+
+/// Extracts and verifies an envelope carried by a Responses reasoning item.
+pub fn unwrap_from_responses_reasoning_item(item: &Value) -> Result<SourceBlock> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| mapping_error("Responses reasoning item must be a JSON object"))?;
+
+    let item_type = required_string(object, "type", "Responses reasoning item.type")?;
+    if item_type != RESPONSES_REASONING_TYPE {
+        return Err(mapping_error(format!(
+            "Responses reasoning item.type must be `{RESPONSES_REASONING_TYPE}`"
+        )));
+    }
+
+    // Codex 0.142.5 omits id/status on the next turn, so id is validated only when present.
+    if let Some(id) = optional_string(object, "id", "Responses reasoning item.id")?
+        && !id.starts_with("rs_")
+    {
+        return Err(mapping_error(
+            "Responses reasoning item.id must start with `rs_` when present",
+        ));
+    }
+
+    let encrypted_content = required_string(
+        object,
+        "encrypted_content",
+        "Responses reasoning item.encrypted_content",
+    )?;
+    unwrap(encrypted_content)
+}
+
+fn encode_envelope(envelope: &Envelope) -> Result<String> {
+    let bytes = serde_json::to_vec(envelope)?;
+
+    Ok(STANDARD.encode(bytes))
+}
+
+fn responses_reasoning_item_id(envelope: &Envelope) -> String {
+    format!(
+        "{RESPONSES_REASONING_ID_PREFIX}_v{}_{}_{:08x}",
+        envelope.version,
+        source_tag(&envelope.source),
+        envelope.checksum
+    )
 }
 
 fn checksum(version: u8, source: &Provider, payload: &[u8]) -> u32 {
@@ -127,6 +195,29 @@ fn source_tag(source: &Provider) -> &'static str {
 
 fn mapping_error(message: impl Into<String>) -> ProxyError {
     ProxyError::ProtocolMapping(message.into())
+}
+
+fn optional_string<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    path: impl Into<String>,
+) -> Result<Option<&'a str>> {
+    let path = path.into();
+    match object.get(field) {
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(mapping_error(format!("{path} must be a string"))),
+    }
+}
+
+fn required_string<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    path: impl Into<String>,
+) -> Result<&'a str> {
+    let path = path.into();
+    optional_string(object, field, path.clone())
+        .and_then(|value| value.ok_or_else(|| mapping_error(format!("{path} is required"))))
 }
 
 #[cfg(test)]
@@ -156,6 +247,97 @@ mod tests {
         assert_eq!(
             decoded.payload_json().unwrap()["encrypted_content"],
             "enc_payload"
+        );
+    }
+
+    #[test]
+    fn wraps_envelope_as_responses_reasoning_item() {
+        let source = SourceBlock::from_json(
+            Provider::Anthropic,
+            &json!({
+                "type": "thinking",
+                "thinking": "Need a tool.",
+                "signature": "sig_anthropic_123"
+            }),
+        )
+        .unwrap();
+
+        let item = wrap_as_responses_reasoning_item(&source).unwrap();
+
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["summary"], json!([]));
+        assert!(item["id"].as_str().is_some_and(|id| id.starts_with("rs_")));
+        assert!(item["encrypted_content"].as_str().unwrap().len() > 64);
+        assert_eq!(unwrap_from_responses_reasoning_item(&item).unwrap(), source);
+    }
+
+    #[test]
+    fn unwraps_codex_echoed_reasoning_item_without_id_or_status() {
+        let source = SourceBlock::new(
+            Provider::Anthropic,
+            br#"{"type":"thinking","thinking":"x","signature":"sig"}"#.to_vec(),
+        );
+        let encrypted_content = wrap(&source).unwrap();
+        let echoed_item = json!({
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": encrypted_content
+        });
+
+        let decoded = unwrap_from_responses_reasoning_item(&echoed_item).unwrap();
+
+        assert_eq!(decoded, source);
+    }
+
+    #[test]
+    fn rejects_non_reasoning_responses_item() {
+        let item = json!({
+            "type": "message",
+            "encrypted_content": "not-used"
+        });
+
+        let err = unwrap_from_responses_reasoning_item(&item).unwrap_err();
+
+        assert!(
+            matches!(err, ProxyError::ProtocolMapping(message) if message.contains("item.type"))
+        );
+    }
+
+    #[test]
+    fn rejects_non_rs_reasoning_id_when_present() {
+        let source = SourceBlock::new(
+            Provider::Anthropic,
+            br#"{"type":"thinking","thinking":"x","signature":"sig"}"#.to_vec(),
+        );
+        let item = json!({
+            "id": "bad_123",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": wrap(&source).unwrap()
+        });
+
+        let err = unwrap_from_responses_reasoning_item(&item).unwrap_err();
+
+        assert!(matches!(err, ProxyError::ProtocolMapping(message) if message.contains("rs_")));
+    }
+
+    #[test]
+    fn responses_reasoning_item_detects_tampered_encrypted_content() {
+        let source = SourceBlock::new(
+            Provider::Anthropic,
+            br#"{"type":"thinking","thinking":"x","signature":"sig"}"#.to_vec(),
+        );
+        let mut item = wrap_as_responses_reasoning_item(&source).unwrap();
+        let encrypted_content = item["encrypted_content"].as_str().unwrap();
+        let bytes = STANDARD.decode(encrypted_content).unwrap();
+        let mut envelope: Envelope = serde_json::from_slice(&bytes).unwrap();
+        envelope.payload[0] ^= 0xff;
+        item["encrypted_content"] = json!(STANDARD.encode(serde_json::to_vec(&envelope).unwrap()));
+
+        let err = unwrap_from_responses_reasoning_item(&item).unwrap_err();
+
+        assert!(
+            matches!(err, ProxyError::ProtocolMapping(message) if message.contains("checksum"))
         );
     }
 
