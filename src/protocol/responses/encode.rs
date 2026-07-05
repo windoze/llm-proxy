@@ -5,17 +5,444 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Number, Value, json};
 
 use crate::{
     error::{ProxyError, Result},
     ir::{
-        message::{ContentBlock, Thinking},
-        request::{IrResponse, StopReason, Usage},
+        message::{ContentBlock, ImageSource, Provider, Role, Thinking},
+        request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
+    protocol::tool_ids::{ToolIdMap, responses_tool_id_map_from_request},
 };
 
 use super::reasoning::preserved_reasoning_item_from_thinking;
+
+const CORE_REQUEST_FIELDS: &[&str] = &[
+    "model",
+    "input",
+    "instructions",
+    "developer",
+    "tools",
+    "tool_choice",
+    "max_output_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stop",
+    "stream",
+];
+
+/// Converts a provider-neutral request into an OpenAI Responses request body.
+pub fn ir_request_to_responses(request: &IrRequest) -> Result<Value> {
+    let tool_ids = responses_tool_id_map_from_request(request)?;
+    let mut body = Map::new();
+
+    body.insert("model".to_owned(), Value::String(request.model.clone()));
+    body.insert(
+        "input".to_owned(),
+        Value::Array(encode_request_input(request, &tool_ids)?),
+    );
+
+    if !request.tools.is_empty() {
+        body.insert("tools".to_owned(), encode_request_tools(&request.tools));
+    }
+
+    if !request.tools.is_empty() || request.tool_choice != ToolChoice::Auto {
+        body.insert(
+            "tool_choice".to_owned(),
+            encode_request_tool_choice(&request.tool_choice),
+        );
+    }
+
+    insert_optional_u32(&mut body, "max_output_tokens", request.max_tokens);
+    insert_optional_f32(&mut body, "temperature", request.temperature)?;
+    insert_optional_f32(&mut body, "top_p", request.top_p)?;
+    insert_optional_u32(&mut body, "top_k", request.top_k);
+
+    if !request.stop.is_empty() {
+        body.insert("stop".to_owned(), encode_request_stop(&request.stop));
+    }
+
+    body.insert("stream".to_owned(), Value::Bool(request.stream));
+    insert_request_extra(&mut body, request);
+
+    Ok(Value::Object(body))
+}
+
+fn encode_request_input(request: &IrRequest, tool_ids: &ToolIdMap) -> Result<Vec<Value>> {
+    let mut input = Vec::new();
+
+    if let Some(system) = &request.system
+        && !system.is_empty()
+    {
+        input.push(encode_request_message_item(
+            "system",
+            encode_message_content(system, "system", false, "request.system")?,
+        ));
+    }
+
+    for (message_index, message) in request.messages.iter().enumerate() {
+        encode_request_message(message, message_index, tool_ids, &mut input)?;
+    }
+
+    if input.is_empty() {
+        return Err(mapping_error("Responses request input must not be empty"));
+    }
+
+    Ok(input)
+}
+
+fn encode_request_message(
+    message: &crate::ir::message::Message,
+    message_index: usize,
+    tool_ids: &ToolIdMap,
+    input: &mut Vec<Value>,
+) -> Result<()> {
+    match message.role {
+        Role::System => encode_user_like_message(
+            "system",
+            &message.content,
+            message_index,
+            false,
+            tool_ids,
+            input,
+        ),
+        Role::User => encode_user_like_message(
+            "user",
+            &message.content,
+            message_index,
+            true,
+            tool_ids,
+            input,
+        ),
+        Role::Assistant => encode_assistant_input_message(message, message_index, tool_ids, input),
+        Role::Tool => encode_tool_input_message(message, message_index, tool_ids, input),
+    }
+}
+
+fn encode_user_like_message(
+    role: &'static str,
+    content: &[ContentBlock],
+    message_index: usize,
+    allow_images: bool,
+    tool_ids: &ToolIdMap,
+    input: &mut Vec<Value>,
+) -> Result<()> {
+    let mut pending_content = Vec::new();
+
+    for (block_index, block) in content.iter().enumerate() {
+        let path = format!("messages[{message_index}].content[{block_index}]");
+        match block {
+            ContentBlock::Text { .. } | ContentBlock::Image(_) => {
+                pending_content.push(encode_message_content_part(
+                    block,
+                    role,
+                    allow_images,
+                    &path,
+                )?);
+            }
+            ContentBlock::ToolResult { .. } if role == "user" => {
+                flush_request_message_item(role, &mut pending_content, input);
+                input.push(encode_function_call_output_item(block, tool_ids, path)?);
+            }
+            ContentBlock::ToolResult { .. } => {
+                return Err(mapping_error(format!(
+                    "{path} is a tool result but message role is {role}"
+                )));
+            }
+            ContentBlock::ToolUse { .. } => {
+                return Err(mapping_error(format!(
+                    "{path} is a tool call but message role is {role}"
+                )));
+            }
+            ContentBlock::Thinking(_) => {
+                return Err(mapping_error(format!(
+                    "{path} is a thinking block but message role is {role}"
+                )));
+            }
+        }
+    }
+
+    flush_request_message_item(role, &mut pending_content, input);
+    Ok(())
+}
+
+fn encode_assistant_input_message(
+    message: &crate::ir::message::Message,
+    message_index: usize,
+    tool_ids: &ToolIdMap,
+    input: &mut Vec<Value>,
+) -> Result<()> {
+    let mut pending_content = Vec::new();
+
+    for (block_index, block) in message.content.iter().enumerate() {
+        let path = format!("messages[{message_index}].content[{block_index}]");
+        match block {
+            ContentBlock::Text { .. } => {
+                pending_content.push(encode_message_content_part(
+                    block,
+                    "assistant",
+                    false,
+                    &path,
+                )?);
+            }
+            ContentBlock::Thinking(thinking) => {
+                flush_request_message_item("assistant", &mut pending_content, input);
+                input.push(encode_reasoning_input_item(thinking, path)?);
+            }
+            ContentBlock::ToolUse { .. } => {
+                flush_request_message_item("assistant", &mut pending_content, input);
+                input.push(encode_function_call_item(block, tool_ids, path)?);
+            }
+            ContentBlock::Image(_) => {
+                return Err(mapping_error(format!(
+                    "{path} is an image block but message role is assistant"
+                )));
+            }
+            ContentBlock::ToolResult { .. } => {
+                return Err(mapping_error(format!(
+                    "{path} is a tool result but message role is assistant"
+                )));
+            }
+        }
+    }
+
+    flush_request_message_item("assistant", &mut pending_content, input);
+    Ok(())
+}
+
+fn encode_tool_input_message(
+    message: &crate::ir::message::Message,
+    message_index: usize,
+    tool_ids: &ToolIdMap,
+    input: &mut Vec<Value>,
+) -> Result<()> {
+    for (block_index, block) in message.content.iter().enumerate() {
+        let path = format!("messages[{message_index}].content[{block_index}]");
+        match block {
+            ContentBlock::ToolResult { .. } => {
+                input.push(encode_function_call_output_item(block, tool_ids, path)?);
+            }
+            _ => {
+                return Err(mapping_error(format!(
+                    "{path} is not a tool result but message role is tool"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn encode_message_content(
+    content: &[ContentBlock],
+    role: &'static str,
+    allow_images: bool,
+    path: impl Into<String>,
+) -> Result<Vec<Value>> {
+    let path = path.into();
+    if content.is_empty() {
+        return Err(mapping_error(format!("{path} must not be empty")));
+    }
+
+    content
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            encode_message_content_part(block, role, allow_images, &format!("{path}[{index}]"))
+        })
+        .collect()
+}
+
+fn encode_message_content_part(
+    block: &ContentBlock,
+    role: &'static str,
+    allow_images: bool,
+    path: &str,
+) -> Result<Value> {
+    match block {
+        ContentBlock::Text { text } => Ok(json!({
+            "type": if role == "assistant" { "output_text" } else { "input_text" },
+            "text": text,
+        })),
+        ContentBlock::Image(source) if allow_images => Ok(encode_input_image_part(source)),
+        ContentBlock::Image(_) => Err(mapping_error(format!(
+            "{path} is an image block, which is not allowed in a {role} Responses message"
+        ))),
+        ContentBlock::Thinking(_) => Err(mapping_error(format!(
+            "{path} is a thinking block, which must be encoded as a Responses reasoning item"
+        ))),
+        ContentBlock::ToolUse { .. } => Err(mapping_error(format!(
+            "{path} is a tool call, which must be encoded as a Responses function_call item"
+        ))),
+        ContentBlock::ToolResult { .. } => Err(mapping_error(format!(
+            "{path} is a tool result, which must be encoded as a Responses function_call_output item"
+        ))),
+    }
+}
+
+fn encode_input_image_part(source: &ImageSource) -> Value {
+    let image_url = match source {
+        ImageSource::Url(url) => url.clone(),
+        ImageSource::Base64 { media_type, data } => format!("data:{media_type};base64,{data}"),
+    };
+
+    json!({
+        "type": "input_image",
+        "image_url": image_url,
+    })
+}
+
+fn flush_request_message_item(
+    role: &'static str,
+    pending_content: &mut Vec<Value>,
+    input: &mut Vec<Value>,
+) {
+    if pending_content.is_empty() {
+        return;
+    }
+
+    input.push(encode_request_message_item(
+        role,
+        std::mem::take(pending_content),
+    ));
+}
+
+fn encode_request_message_item(role: &'static str, content: Vec<Value>) -> Value {
+    json!({
+        "type": "message",
+        "role": role,
+        "content": content,
+    })
+}
+
+fn encode_reasoning_input_item(thinking: &Thinking, path: String) -> Result<Value> {
+    if thinking.source != Provider::Responses {
+        return Err(mapping_error(format!(
+            "{path} must be Responses-origin thinking to encode as a Responses reasoning input item"
+        )));
+    }
+
+    if let Some(item) = preserved_reasoning_item_from_thinking(thinking, path.as_str())? {
+        return Ok(Value::Object(item));
+    }
+
+    let encrypted_content = reasoning_encrypted_content_from_opaque(thinking, &path)?;
+    Ok(json!({
+        "type": "reasoning",
+        "summary": encode_reasoning_summary(thinking),
+        "encrypted_content": encrypted_content,
+    }))
+}
+
+fn encode_function_call_item(
+    block: &ContentBlock,
+    tool_ids: &ToolIdMap,
+    path: String,
+) -> Result<Value> {
+    let ContentBlock::ToolUse { id, name, input } = block else {
+        return Err(mapping_error(format!("{path} must be a tool call")));
+    };
+    let call_id = tool_ids.responses_call_id(id)?;
+
+    Ok(json!({
+        "type": "function_call",
+        "status": "completed",
+        "call_id": call_id,
+        "name": name,
+        "arguments": serde_json::to_string(input)?,
+    }))
+}
+
+fn encode_function_call_output_item(
+    block: &ContentBlock,
+    tool_ids: &ToolIdMap,
+    path: String,
+) -> Result<Value> {
+    let ContentBlock::ToolResult {
+        tool_use_id,
+        content,
+        is_error,
+    } = block
+    else {
+        return Err(mapping_error(format!("{path} must be a tool result")));
+    };
+    let call_id = tool_ids.responses_call_id(tool_use_id)?;
+
+    Ok(json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": encode_tool_output(content)?,
+        "is_error": is_error,
+    }))
+}
+
+fn encode_request_tools(tools: &[ToolDef]) -> Value {
+    Value::Array(
+        tools
+            .iter()
+            .map(|tool| {
+                let mut function = Map::new();
+                function.insert("type".to_owned(), json!("function"));
+                function.insert("name".to_owned(), Value::String(tool.name.clone()));
+                if let Some(description) = &tool.description {
+                    function.insert("description".to_owned(), Value::String(description.clone()));
+                }
+                function.insert("parameters".to_owned(), tool.input_schema.clone());
+                Value::Object(function)
+            })
+            .collect(),
+    )
+}
+
+fn encode_request_tool_choice(choice: &ToolChoice) -> Value {
+    match choice {
+        ToolChoice::Auto => json!("auto"),
+        ToolChoice::None => json!("none"),
+        ToolChoice::Required => json!("required"),
+        ToolChoice::Tool(name) => json!({
+            "type": "function",
+            "name": name,
+        }),
+    }
+}
+
+fn encode_request_stop(stop: &[String]) -> Value {
+    Value::Array(stop.iter().cloned().map(Value::String).collect())
+}
+
+fn insert_optional_u32(body: &mut Map<String, Value>, field: &'static str, value: Option<u32>) {
+    if let Some(value) = value {
+        body.insert(
+            field.to_owned(),
+            Value::Number(Number::from(u64::from(value))),
+        );
+    }
+}
+
+fn insert_optional_f32(
+    body: &mut Map<String, Value>,
+    field: &'static str,
+    value: Option<f32>,
+) -> Result<()> {
+    if let Some(value) = value {
+        let number = Number::from_f64(f64::from(value))
+            .ok_or_else(|| mapping_error(format!("request.{field} must be a finite number")))?;
+        body.insert(field.to_owned(), Value::Number(number));
+    }
+
+    Ok(())
+}
+
+fn insert_request_extra(body: &mut Map<String, Value>, request: &IrRequest) {
+    for (key, value) in &request.extra {
+        if CORE_REQUEST_FIELDS.contains(&key.as_str()) {
+            continue;
+        }
+        body.insert(key.clone(), value.clone());
+    }
+}
 
 /// Converts a provider-neutral non-streaming response into a Responses object.
 pub fn ir_response_to_responses(resp: &IrResponse) -> Result<Value> {
@@ -143,16 +570,33 @@ fn encode_reasoning_item(
     item.insert("status".to_owned(), json!(status));
     item.insert("summary".to_owned(), encode_reasoning_summary(thinking));
 
-    if let Some(opaque) = &thinking.opaque {
-        let encrypted_content = std::str::from_utf8(opaque).map_err(|err| {
-            mapping_error(format!(
-                "Responses reasoning encrypted_content must be valid UTF-8: {err}"
-            ))
-        })?;
-        item.insert("encrypted_content".to_owned(), json!(encrypted_content));
+    if thinking.opaque.is_some() {
+        item.insert(
+            "encrypted_content".to_owned(),
+            json!(reasoning_encrypted_content_from_opaque(
+                thinking,
+                format!("output[{output_index}]")
+            )?),
+        );
     }
 
     Ok(Value::Object(item))
+}
+
+fn reasoning_encrypted_content_from_opaque(
+    thinking: &Thinking,
+    path: impl Into<String>,
+) -> Result<&str> {
+    let path = path.into();
+    let opaque = thinking
+        .opaque
+        .as_deref()
+        .ok_or_else(|| mapping_error(format!("{path}.opaque encrypted_content is required")))?;
+    std::str::from_utf8(opaque).map_err(|err| {
+        mapping_error(format!(
+            "{path}.opaque encrypted_content must be valid UTF-8: {err}"
+        ))
+    })
 }
 
 fn encode_reasoning_summary(thinking: &Thinking) -> Value {
@@ -238,10 +682,215 @@ fn mapping_error(message: impl Into<String>) -> ProxyError {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     use super::*;
-    use crate::ir::message::{EchoPolicy, Provider};
+    use crate::ir::message::{EchoPolicy, Message, Provider, Role};
+
+    #[test]
+    fn encodes_request_with_restored_responses_reasoning_and_tool_results() {
+        let request = IrRequest {
+            model: "gpt-5-codex".to_owned(),
+            system: Some(vec![ContentBlock::Text {
+                text: "Use repository context.".to_owned(),
+            }]),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "look up weather".to_owned(),
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking(Thinking {
+                            text: Some("Need the weather tool.".to_owned()),
+                            opaque: Some(b"enc_payload_from_signature".to_vec()),
+                            source: Provider::Responses,
+                            echo_policy: EchoPolicy::Always,
+                        }),
+                        ContentBlock::ToolUse {
+                            id: "call_weather".to_owned(),
+                            name: "lookup_weather".to_owned(),
+                            input: json!({ "city": "Paris" }),
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_weather".to_owned(),
+                        content: vec![ContentBlock::Text {
+                            text: "sunny".to_owned(),
+                        }],
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![ToolDef {
+                name: "lookup_weather".to_owned(),
+                description: Some("Fetch weather".to_owned()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    }
+                }),
+            }],
+            tool_choice: ToolChoice::Tool("lookup_weather".to_owned()),
+            max_tokens: Some(256),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::from_iter([("metadata".to_owned(), json!({ "session": "s_1" }))]),
+        };
+
+        let encoded = ir_request_to_responses(&request).unwrap();
+
+        assert_eq!(encoded["model"], "gpt-5-codex");
+        assert_eq!(encoded["max_output_tokens"], 256);
+        assert_eq!(encoded["stream"], false);
+        assert_eq!(encoded["metadata"], json!({ "session": "s_1" }));
+        assert_eq!(
+            encoded["tools"],
+            json!([{
+                "type": "function",
+                "name": "lookup_weather",
+                "description": "Fetch weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    }
+                }
+            }])
+        );
+        assert_eq!(
+            encoded["tool_choice"],
+            json!({ "type": "function", "name": "lookup_weather" })
+        );
+        assert_eq!(
+            encoded["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "Use repository context."
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "look up weather"
+                    }]
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": "Need the weather tool."
+                    }],
+                    "encrypted_content": "enc_payload_from_signature"
+                },
+                {
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_weather",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Paris\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_weather",
+                    "output": "sunny",
+                    "is_error": false
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn encodes_request_reasoning_from_preserved_item_without_null_status() {
+        let raw_item = json!({
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": "Need a tool." }],
+            "encrypted_content": "enc_preserved",
+            "status": null,
+            "provider_metadata": { "kept": true }
+        });
+        let request = IrRequest {
+            model: "gpt-5-codex".to_owned(),
+            system: None,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking(Thinking {
+                    text: Some("ignored when preserved item exists".to_owned()),
+                    opaque: Some(serde_json::to_vec(&raw_item).unwrap()),
+                    source: Provider::Responses,
+                    echo_policy: EchoPolicy::Always,
+                })],
+            }],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::new(),
+        };
+
+        let encoded = ir_request_to_responses(&request).unwrap();
+        let item = encoded["input"][0].as_object().unwrap();
+
+        assert_eq!(item.get("type").unwrap(), "reasoning");
+        assert_eq!(item.get("encrypted_content").unwrap(), "enc_preserved");
+        assert_eq!(
+            item.get("provider_metadata").unwrap(),
+            &json!({ "kept": true })
+        );
+        assert!(!item.contains_key("status"));
+    }
+
+    #[test]
+    fn rejects_non_responses_thinking_in_request_input() {
+        let request = IrRequest {
+            model: "gpt-5-codex".to_owned(),
+            system: None,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking(Thinking {
+                    text: Some("Anthropic thinking cannot go to Responses raw.".to_owned()),
+                    opaque: Some(b"anthropic_signature".to_vec()),
+                    source: Provider::Anthropic,
+                    echo_policy: EchoPolicy::Always,
+                })],
+            }],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop: Vec::new(),
+            stream: false,
+            extra: Map::new(),
+        };
+
+        let error = ir_request_to_responses(&request).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message.contains("Responses-origin thinking"))
+        );
+    }
 
     #[test]
     fn encodes_response_with_reasoning_text_function_call_and_usage() {

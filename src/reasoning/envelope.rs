@@ -322,6 +322,11 @@ pub fn wrap_as_signature(source_block: &SourceBlock) -> Result<String> {
     wrap_as_signature_with_store(source_block, EnvelopeLimits::default(), &NoopStore)
 }
 
+/// Returns true when an Anthropic signature carries a gateway-owned envelope.
+pub fn is_wrapped_signature(signature: &str) -> bool {
+    signature.starts_with(ANTHROPIC_SIGNATURE_PREFIX)
+}
+
 /// Wraps a source block as an Anthropic signature with optional store fallback.
 pub fn wrap_as_signature_with_store<S: ReasoningStore + ?Sized>(
     source_block: &SourceBlock,

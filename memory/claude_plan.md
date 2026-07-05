@@ -12,23 +12,23 @@ I will follow `TODO.md` as the authoritative task list and complete exactly the 
 8. Commit all task-related changes with a descriptive message and the required co-author trailer.
 9. Stop after this one task.
 
-## Selected Task
+## Current Invocation
 
-First incomplete task: `M5-03` — encode `Thinking { source: Responses }` as an Anthropic `thinking` content block whose `signature` carries a reasoning envelope produced from the opaque Responses reasoning payload.
+Selected task: `M5-04` — reverse-restore Claude Code-returned Anthropic `thinking.signature` values into Responses reasoning items for the backend request `input`.
 
-## Task-Specific Steps
+Task-specific steps:
 
-1. Update `src/protocol/anthropic/encode.rs` so Anthropic response encoding can fail with `ProxyError` instead of panicking or silently dropping envelope errors.
-2. For `Provider::Responses`, require `Thinking.opaque`, wrap it as `SourceBlock { source: Responses, payload: opaque }`, and set the Anthropic `signature` to `wrap_as_signature(...)`.
-3. Preserve existing Anthropic-origin signature behavior and current text/tool/image encoding behavior.
-4. Update callers and unit tests for the new fallible encoder shape.
-5. Add focused tests that unwrap the generated signature and prove the original Responses opaque bytes are preserved.
-6. Run formatting, clippy, and the full test suite, then update `TODO.md` and commit the completed task.
+1. Inspect the existing Anthropic request decoder, Responses encoder helpers, and reasoning envelope APIs.
+2. Teach Anthropic thinking decode to recognize gateway-owned signatures, unwrap them, and convert Responses-source envelopes back into `Thinking { source: Responses, opaque: original_payload }`.
+3. Add or extend Responses request encoding so IR messages containing Responses-origin thinking emit `type:"reasoning"` input items with restored `encrypted_content`/preserved item fields.
+4. Add focused unit tests covering signature unwrap, restored Responses request input, and invalid/wrong-source signature rejection.
+5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. Mark `M5-04` as `[DONE]` in `TODO.md`, update this file with completion status, and commit the task changes.
 
 ## Progress Update
 
-Implemented M5-03. The Anthropic non-streaming encoder now returns `Result<Value>`, propagates protocol/envelope errors, preserves existing Anthropic-origin signatures, and wraps Responses-origin `Thinking.opaque` bytes into an Anthropic thinking `signature` via the reasoning envelope. Added unit coverage for successful signature unwrap and missing opaque payload rejection. Formatting, clippy, and the full test suite pass.
+Implemented M5-04. Anthropic request decoding now recognizes gateway-owned thinking signatures, unwraps Responses-source envelopes into Responses-origin IR thinking blocks, and rejects wrapped signatures carrying any other source. Responses request encoding now emits restored `reasoning` input items from Responses-origin thinking, preserving full reasoning item JSON when available or rebuilding a minimal item with the restored `encrypted_content` otherwise. Added focused unit coverage for signature unwrap/rejection and Responses request input restoration. Formatting, clippy, and the full test suite pass.
 
 ## Completion Update
 
-`M5-03` is marked `[DONE]` in `TODO.md` with implementation notes and validation results. No phase-level `PLAN.md` update was needed.
+`M5-04` is marked `[DONE]` in `TODO.md` with implementation notes and validation results. No phase-level `PLAN.md` update was needed.

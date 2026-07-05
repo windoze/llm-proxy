@@ -11,6 +11,7 @@ use crate::{
         message::{ContentBlock, EchoPolicy, ImageSource, Message, Provider, Role, Thinking},
         request::{IrRequest, ToolChoice, ToolDef},
     },
+    reasoning::envelope::{is_wrapped_signature, unwrap_from_signature},
 };
 
 const PROTOCOL: &str = "anthropic";
@@ -192,9 +193,27 @@ fn decode_tool_result(block: &Map<String, Value>, path: String) -> Result<Conten
 
 fn decode_thinking(block: &Map<String, Value>, path: String) -> Result<ContentBlock> {
     let signature = required_string(block, "signature", format!("{path}.signature"))?;
+    let thinking_text = required_string(block, "thinking", format!("{path}.thinking"))?.to_owned();
+
+    if is_wrapped_signature(signature) {
+        let source_block = unwrap_from_signature(signature)?;
+        if source_block.source != Provider::Responses {
+            return Err(mapping_error(format!(
+                "{path}.signature envelope has source {:?}, expected Responses",
+                source_block.source
+            )));
+        }
+
+        return Ok(ContentBlock::Thinking(Thinking {
+            text: Some(thinking_text),
+            opaque: Some(source_block.payload),
+            source: Provider::Responses,
+            echo_policy: EchoPolicy::Always,
+        }));
+    }
 
     Ok(ContentBlock::Thinking(Thinking {
-        text: Some(required_string(block, "thinking", format!("{path}.thinking"))?.to_owned()),
+        text: Some(thinking_text),
         opaque: Some(signature.as_bytes().to_vec()),
         source: Provider::Anthropic,
         echo_policy: EchoPolicy::Always,
@@ -551,6 +570,69 @@ mod tests {
             assert_eq!(request.tool_choice, expected);
             assert!(!request.stream);
         }
+    }
+
+    #[test]
+    fn unwraps_gateway_responses_signature_into_responses_thinking() {
+        let signature = crate::reasoning::envelope::wrap_as_signature(
+            &crate::reasoning::envelope::SourceBlock::new(
+                Provider::Responses,
+                b"enc_payload_from_responses".to_vec(),
+            ),
+        )
+        .unwrap();
+        let body = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "thinking",
+                    "thinking": "Need the weather tool.",
+                    "signature": signature
+                }]
+            }]
+        });
+
+        let request = anthropic_request_to_ir(&body).unwrap();
+        let ContentBlock::Thinking(thinking) = &request.messages[0].content[0] else {
+            panic!("expected thinking block");
+        };
+
+        assert_eq!(thinking.text, Some("Need the weather tool.".to_owned()));
+        assert_eq!(
+            thinking.opaque,
+            Some(b"enc_payload_from_responses".to_vec())
+        );
+        assert_eq!(thinking.source, Provider::Responses);
+        assert_eq!(thinking.echo_policy, EchoPolicy::Always);
+    }
+
+    #[test]
+    fn rejects_gateway_signature_with_non_responses_source() {
+        let signature = crate::reasoning::envelope::wrap_as_signature(
+            &crate::reasoning::envelope::SourceBlock::new(
+                Provider::Anthropic,
+                b"anthropic_signature".to_vec(),
+            ),
+        )
+        .unwrap();
+        let body = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "thinking",
+                    "thinking": "Need the weather tool.",
+                    "signature": signature
+                }]
+            }]
+        });
+
+        let error = anthropic_request_to_ir(&body).unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::ProtocolMapping(message) if message.contains("expected Responses"))
+        );
     }
 
     #[test]
