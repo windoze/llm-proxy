@@ -1,21 +1,27 @@
 ## Execution Plan
 
-I cannot record private chain-of-thought, but this file tracks the concise rationale, execution plan, and progress for the current invocation.
+I will follow the task order in `TODO.md` and complete exactly the first task whose heading is not prefixed with `[DONE]`.
 
-1. Read `TODO.md` first and identify the first task whose heading is not prefixed with `[DONE]`.
-2. Check the latest commit only for unfinished work directly relevant to that selected task.
-3. Inspect the selected task's requirements, dependencies, and validation instructions.
-4. Implement the task completely, or add the minimum prerequisite task in `TODO.md` if a concrete blocker makes implementation impossible.
-5. Run the required formatting, linting, and tests in the requested order unless only documentation changed and a prior green run can be reused.
-6. Update `TODO.md` by prefixing the completed task title with `[DONE]` and filling in its completion record, or record any blocker/prerequisite without marking it done.
-7. Update this progress file at major milestones.
-8. Commit all relevant changes with a descriptive message and then stop without starting the next task.
+1. Read `TODO.md` to identify the first incomplete task and its requirements, dependencies, and validation instructions.
+2. Check the latest commit message only for unfinished work directly relevant to that task.
+3. Inspect the relevant project files for that task, preserving unrelated user changes.
+4. Implement the required changes completely, or add the minimum prerequisite task to `TODO.md` if a concrete blocker makes correct implementation impossible.
+5. Run required formatting, linting, and tests in the requested order.
+6. Update `TODO.md` with `[DONE]` and a completion record only after the task is implemented and validated.
+7. Commit all task-related changes with a descriptive message and stop without starting the next task.
 
-## Progress
+## Current Task
 
-- Selected task: `M2-03` — implement generic SSE parsing infrastructure in `stream/sse.rs`.
-- Latest commit `20d79e0 [M2-02] Mark execution plan complete` does not mention an unfinished issue that changes this task.
-- Planned implementation: expose a small typed SSE item plus an OpenAI Chat SSE parser built on `eventsource-stream`, filtering `[DONE]` into normal stream termination and surfacing malformed stream/parser errors.
-- Implemented `src/stream/sse.rs` and exported it from `src/stream/mod.rs`; first clippy run found an unused import, which was removed before rerunning validation.
+First incomplete task: `M2-04` — implement the OpenAI Chat/DeepSeek SSE chunk to `IrEvent` state machine in `stream/chat_decoder.rs`.
+
+Focused steps:
+1. Inspect existing IR event definitions, SSE helper, stream module wiring, and existing protocol test conventions.
+2. Add a stateful decoder that emits message/block lifecycle events for text, reasoning, and streamed tool calls.
+3. Cover multi-tool streaming and mixed reasoning/content cases with unit tests.
+4. Run formatting, linting, and tests before marking `M2-04` done and committing.
+
+Progress:
+- Added `src/stream/chat_decoder.rs` and wired it from `src/stream/mod.rs`.
+- First validation pass reached clippy and found the new staged module is not yet called by routing, matching earlier staged modules; I will add the same local dead-code allowance used by existing staged components and rerun validation.
 - Validation completed successfully with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked `M2-03` as `[DONE]` in `TODO.md` with a completion record; next step is committing the task changes and stopping.
+- Marked `M2-04` as `[DONE]` in `TODO.md` with a completion record; next step is committing the task changes and stopping.

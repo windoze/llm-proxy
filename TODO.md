@@ -272,7 +272,7 @@ IR content → Anthropic `content` block 数组；`ToolUse` → `tool_use` block
 - 新增单元测试覆盖具名事件与默认 `message` 事件解析、多行 `data:` 合并、OpenAI `[DONE]` 终止、非法 UTF-8 解析错误。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-04 `[TODO]` Chat SSE → IR event 状态机 (`stream/chat_decoder.rs`) 🔒
+### [DONE] M2-04 Chat SSE → IR event 状态机 (`stream/chat_decoder.rs`) 🔒
 实现把 OpenAI Chat 流式 chunk 转成 `IrEvent` 流的**有状态**解析器：
 - 首个 chunk → `MessageStart`
 - `delta.content` → 维护 text block（首次发 `BlockStart{Text}`）+ `TextDelta`
@@ -280,6 +280,13 @@ IR content → Anthropic `content` block 数组；`ToolUse` → `tool_use` block
 - `delta.tool_calls[i]` → 按 tool index 维护 ToolUse block，`function.arguments` 碎片 → `ToolUseDelta{partial_json}`
 - `finish_reason` → 关闭所有开启的 block（`BlockStop`）+ `MessageDelta{stop_reason}` + `MessageStop`
 **tool-call 流式重组是重点**（DESIGN §6.2），需处理碎片无边界问题。加单元测试覆盖多 tool、reasoning+content 混合。
+
+完成记录：
+- 2026-07-06：已新增 `src/stream/chat_decoder.rs` 并从 `src/stream/mod.rs` 暴露，提供 `ChatStreamDecoder` 与 `chat_sse_to_ir_events`，把 OpenAI Chat/DeepSeek SSE chunk 转为 provider-neutral `IrEvent` 流。
+- 已实现有状态 block lifecycle：首个 chunk 发 `MessageStart`，`reasoning_content`/`content` 首次出现时分别创建 thinking/text block 并发 delta；`finish_reason` 会关闭所有开启 block、发 `MessageDelta`，并在流结束时发 `MessageStop`，同时支持 usage-only 尾 chunk 保留 token usage。
+- 已按 tool index 维护多 tool call block，保留 `function.arguments` 碎片原始边界；当 arguments 早于 `id`/`function.name` 到达时会先缓冲，待 metadata 完整后再创建 ToolUse block 并按原顺序回放，避免无边界碎片丢失或错位。
+- 新增单元测试覆盖 reasoning+content 混合、多 tool 碎片交错、metadata 晚到的 tool arguments 缓冲、usage 尾 chunk 以及缺少 `finish_reason` 的协议错误。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-05 `[TODO]` IR event → Anthropic SSE 编码 (`protocol/anthropic/stream.rs`) 🔒
 实现 `IrEvent` 流 → Anthropic SSE 事件流：
