@@ -288,13 +288,20 @@ IR content → Anthropic `content` block 数组；`ToolUse` → `tool_use` block
 - 新增单元测试覆盖 reasoning+content 混合、多 tool 碎片交错、metadata 晚到的 tool arguments 缓冲、usage 尾 chunk 以及缺少 `finish_reason` 的协议错误。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-05 `[TODO]` IR event → Anthropic SSE 编码 (`protocol/anthropic/stream.rs`) 🔒
+### [DONE] M2-05 IR event → Anthropic SSE 编码 (`protocol/anthropic/stream.rs`) 🔒
 实现 `IrEvent` 流 → Anthropic SSE 事件流：
 `MessageStart→message_start`；`BlockStart→content_block_start`（按 index 与 type）；
 `TextDelta→content_block_delta{text_delta}`；`ThinkingDelta→content_block_delta{thinking_delta}`；
 `ToolUseDelta→content_block_delta{input_json_delta{partial_json}}`；`BlockStop→content_block_stop`；
 `MessageDelta→message_delta{stop_reason,usage}`；`MessageStop→message_stop`。
 维护正确的 block index 序列（DESIGN §6.1）。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/anthropic/stream.rs` 并从 `protocol::anthropic` 暴露，提供 `AnthropicStreamEncoder` 与 `ir_events_to_anthropic_sse`，将 provider-neutral `IrEvent` 编码为 Anthropic Messages API SSE bytes。
+- 已覆盖 `message_start`、`content_block_start`、`content_block_delta`（text/thinking/input_json）、`content_block_stop`、`message_delta` 与 `message_stop` 的事件名和 JSON payload；thinking block start 会输出空 `signature` 字段，tool-use start 会输出空 `input` 对象。
+- 编码器会校验 message lifecycle、block index 递增、delta/stop 只能作用于已开启 block、终止后不可继续输出，避免 Anthropic SSE index 序列错位。
+- 新增单元测试覆盖 thinking/text/tool-use lifecycle、usage/cache 字段映射、SSE frame 格式、非连续 block index 拒绝与未开启 block delta 拒绝。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-06 `[TODO]` tool ID 映射与配对 (`protocol/mod.rs` 或 `ir/`) 🔒
 实现 `tool_call_id`(Chat) ↔ `tool_use_id`(Anthropic) 的映射与"调用→结果"配对链保真

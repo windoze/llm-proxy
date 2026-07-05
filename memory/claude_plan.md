@@ -1,27 +1,27 @@
-## Execution Plan
+# Execution Plan
 
-I will follow the task order in `TODO.md` and complete exactly the first task whose heading is not prefixed with `[DONE]`.
+I will follow the task list in `TODO.md` as the source of truth and complete only the first task whose heading is not prefixed with `[DONE]`.
 
-1. Read `TODO.md` to identify the first incomplete task and its requirements, dependencies, and validation instructions.
-2. Check the latest commit message only for unfinished work directly relevant to that task.
-3. Inspect the relevant project files for that task, preserving unrelated user changes.
-4. Implement the required changes completely, or add the minimum prerequisite task to `TODO.md` if a concrete blocker makes correct implementation impossible.
-5. Run required formatting, linting, and tests in the requested order.
-6. Update `TODO.md` with `[DONE]` and a completion record only after the task is implemented and validated.
-7. Commit all task-related changes with a descriptive message and stop without starting the next task.
+1. Read `TODO.md` to identify the first incomplete task and its requirements, dependencies, validation steps, and completion record format.
+2. Check the latest commit message only after the current task is identified, and only consider it if it explicitly mentions an unfinished issue directly relevant to that task.
+3. Inspect the repository structure and the files/tests related to the selected task.
+4. Implement the task as specified, adding or updating tests and documentation only where directly required.
+5. Run formatting, linting, and relevant/full tests according to the task’s validation requirements and repository conventions.
+6. If validation exposes an unscheduled failing test or a concrete blocker, either fix it if it is in scope or add the minimum prerequisite task to `TODO.md`, commit that bookkeeping, and stop.
+7. When the task is complete, update `TODO.md` by prefixing the task heading with `[DONE]` and filling in its completion record with the actual implementation and validation details.
+8. Commit all changes for this task with a clear task-scoped commit message including the required co-author trailer.
+9. Stop without starting the next task.
 
 ## Current Task
 
-First incomplete task: `M2-04` — implement the OpenAI Chat/DeepSeek SSE chunk to `IrEvent` state machine in `stream/chat_decoder.rs`.
+Selected first incomplete task: `M2-05` — implement `IrEvent` stream to Anthropic SSE event encoding in `protocol/anthropic/stream.rs`.
 
-Focused steps:
-1. Inspect existing IR event definitions, SSE helper, stream module wiring, and existing protocol test conventions.
-2. Add a stateful decoder that emits message/block lifecycle events for text, reasoning, and streamed tool calls.
-3. Cover multi-tool streaming and mixed reasoning/content cases with unit tests.
-4. Run formatting, linting, and tests before marking `M2-04` done and committing.
+Task-specific steps:
+1. Done: checked the latest commit message; it completed M2-04 and did not mention an unfinished issue relevant to M2-05.
+2. Done: inspected IR event definitions, Anthropic non-stream encoder, stream decoder conventions, error handling, DESIGN §6.1, and Anthropic streaming docs.
+3. Done: implemented the Anthropic SSE encoder with event names, JSON payloads, block index validation, stop reason mapping, usage mapping, and SSE framing.
+4. Done: added focused tests covering thinking/text/tool-use events, usage/cache mapping, SSE bytes, non-sequential block indexes, and unopened block deltas.
+5. Done: ran `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+6. Done: marked M2-05 `[DONE]` in `TODO.md` and filled its completion record.
 
-Progress:
-- Added `src/stream/chat_decoder.rs` and wired it from `src/stream/mod.rs`.
-- First validation pass reached clippy and found the new staged module is not yet called by routing, matching earlier staged modules; I will add the same local dead-code allowance used by existing staged components and rerun validation.
-- Validation completed successfully with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked `M2-04` as `[DONE]` in `TODO.md` with a completion record; next step is committing the task changes and stopping.
+Remaining step: commit all task changes and stop.
