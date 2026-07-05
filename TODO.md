@@ -303,10 +303,16 @@ IR content → Anthropic `content` block 数组；`ToolUse` → `tool_use` block
 - 新增单元测试覆盖 thinking/text/tool-use lifecycle、usage/cache 字段映射、SSE frame 格式、非连续 block index 拒绝与未开启 block delta 拒绝。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M2-06 `[TODO]` tool ID 映射与配对 (`protocol/mod.rs` 或 `ir/`) 🔒
+### [DONE] M2-06 tool ID 映射与配对 (`protocol/mod.rs` 或 `ir/`) 🔒
 实现 `tool_call_id`(Chat) ↔ `tool_use_id`(Anthropic) 的映射与"调用→结果"配对链保真
 （DESIGN §6.2）。在请求方向：Anthropic 的 `tool_result.tool_use_id` 要对回 Chat 的 `tool_call_id`。
 确保多轮对话中 ID 不错位。加测试。
+
+完成记录：
+- 2026-07-06：已新增 `src/protocol/tool_ids.rs` 并从 `protocol::tool_ids` 暴露请求级工具 ID 映射/校验工具。
+- 已实现 `ToolIdMap`，支持 Chat `tool_call_id` ↔ Anthropic `tool_use_id` 双向映射、identity 映射、冲突检测与确定性 pair 输出；当前 Chat↔Anthropic 无状态链路使用同 ID 保真。
+- 已实现 `tool_id_map_from_request` / `validate_tool_result_pairs`，按 IR 请求历史扫描 assistant `ToolUse` 与 user/tool `ToolResult`，拒绝未知结果 ID、重复结果、重复 tool-use ID、错误 role 上的工具块和未完成配对，覆盖多 tool、多轮、结果顺序不同的配对场景。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M2-07 `[TODO]` DeepSeek 消息交替规整 (`protocol/openai_chat/encode.rs`)
 IR → Chat 请求方向：实现 DeepSeek 严格 user/assistant 交替约束处理——合并连续同 role 消息

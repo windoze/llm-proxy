@@ -1,27 +1,23 @@
-# Execution Plan
+## Execution Plan
 
-I will follow the task list in `TODO.md` as the source of truth and complete only the first task whose heading is not prefixed with `[DONE]`.
+I will complete exactly the first incomplete task listed in `TODO.md`, then stop after committing the result.
 
-1. Read `TODO.md` to identify the first incomplete task and its requirements, dependencies, validation steps, and completion record format.
-2. Check the latest commit message only after the current task is identified, and only consider it if it explicitly mentions an unfinished issue directly relevant to that task.
-3. Inspect the repository structure and the files/tests related to the selected task.
-4. Implement the task as specified, adding or updating tests and documentation only where directly required.
-5. Run formatting, linting, and relevant/full tests according to the task’s validation requirements and repository conventions.
-6. If validation exposes an unscheduled failing test or a concrete blocker, either fix it if it is in scope or add the minimum prerequisite task to `TODO.md`, commit that bookkeeping, and stop.
-7. When the task is complete, update `TODO.md` by prefixing the task heading with `[DONE]` and filling in its completion record with the actual implementation and validation details.
-8. Commit all changes for this task with a clear task-scoped commit message including the required co-author trailer.
-9. Stop without starting the next task.
+1. Read `TODO.md` to identify the first heading that is not prefixed with `[DONE]`.
+2. Check the latest commit message only for unfinished work directly relevant to that selected task.
+3. Inspect the task requirements, dependencies, validation notes, and nearby project context needed to implement it.
+4. Implement the task without changing unrelated behavior or using workarounds.
+5. Run the required formatting, linting, and tests for the changed scope, escalating to the full suite when required by the task or by observed failures.
+6. If a blocking prerequisite is discovered, update `TODO.md` with the minimum required prerequisite task, commit that bookkeeping, and stop.
+7. If the task is completed, mark its title in `TODO.md` with `[DONE]`, update its completion record, and avoid routine `PLAN.md` changes unless phase-level sequencing changed.
+8. Commit all relevant changes for this task with a clear task-specific message and the required co-author trailer.
 
-## Current Task
+## Progress
 
-Selected first incomplete task: `M2-05` — implement `IrEvent` stream to Anthropic SSE event encoding in `protocol/anthropic/stream.rs`.
-
-Task-specific steps:
-1. Done: checked the latest commit message; it completed M2-04 and did not mention an unfinished issue relevant to M2-05.
-2. Done: inspected IR event definitions, Anthropic non-stream encoder, stream decoder conventions, error handling, DESIGN §6.1, and Anthropic streaming docs.
-3. Done: implemented the Anthropic SSE encoder with event names, JSON payloads, block index validation, stop reason mapping, usage mapping, and SSE framing.
-4. Done: added focused tests covering thinking/text/tool-use events, usage/cache mapping, SSE bytes, non-sequential block indexes, and unopened block deltas.
-5. Done: ran `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. Done: marked M2-05 `[DONE]` in `TODO.md` and filled its completion record.
-
-Remaining step: commit all task changes and stop.
+- Created this plan before running repository commands.
+- Read the top of `TODO.md`; the first incomplete task is `M2-06` (`tool ID 映射与配对`).
+- Latest commit is `M2-05` and does not mention unfinished work directly relevant to `M2-06`.
+- Inspected the current IR/protocol code and DESIGN §6.2/§6.3. Current adapters preserve IDs verbatim but lack a central invariant for Chat `tool_call_id` ↔ Anthropic `tool_use_id` and for prior-call/result pairing.
+- Implementation approach: add a focused protocol helper that records bidirectional Chat/Anthropic tool ID mappings, builds the stateless identity mapping from IR request history, rejects duplicate or unknown tool results, and covers multi-tool/multi-turn cases with tests.
+- Added `protocol::tool_ids` with `ToolIdMap`, request-history pairing validation, and tests for explicit mappings, multi-turn identity mappings, unknown result IDs, duplicate results, duplicate tool-use IDs, unresolved calls, and tool blocks on invalid roles.
+- Validation completed: formatting, clippy with warnings denied, and the full Rust test suite all passed.
+- Marked `M2-06` as `[DONE]` in `TODO.md` with completion notes.
