@@ -8,14 +8,15 @@
 6. Update TODO.md by prefixing the completed task heading with [DONE] and filling in its completion record; update PLAN.md only if phase-level sequencing changes.
 7. Commit all resulting changes with a descriptive message and the required co-author trailer, then stop without starting the next task.
 
-Progress: Plan initialized before task inspection.
+Progress: M4-05 selected for this invocation.
 
 Checkpoint:
-- First incomplete task identified: M4-04, Responses reasoning item field-preservation.
-- Latest commit only completed M4-03 and does not introduce an explicit unfinished prerequisite.
-- Implementation focus: preserve `encrypted_content` during Responses reasoning item conversion and ensure `status: null` is omitted rather than forwarded.
-- Implemented a Responses-local reasoning helper that normalizes reasoning items by preserving all fields, requiring `encrypted_content`, and dropping only `status: null`.
-- Wired Responses decode/encode to carry normalized raw reasoning item JSON through `Thinking.opaque` when available, with tests for encrypted-content preservation and status handling.
-- Refined the Responses encoder to propagate protocol errors for malformed preserved reasoning items instead of panicking.
+- First incomplete task identified: M4-05, length-limit protection and default-disabled fallback interface.
+- Latest commit completed M4-04 and does not mention unfinished work that blocks M4-05.
+- Implementation plan: inspect the M4-05 task body and existing `reasoning/envelope.rs` implementation, add configurable maximum opaque payload protection, expose a disabled-by-default fallback storage interface rather than silently accepting oversized payloads, cover both Responses and Anthropic envelope paths as applicable, add focused unit tests, then run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+- Completion plan: after validation, mark M4-05 `[DONE]` in `TODO.md`, record the validation outcome, update this file, and commit the completed task.
+- Implemented `EnvelopeLimits`, `ReasoningStore`, and default `NoopStore`; default wrap/unwrap paths remain stateless and oversized envelopes fail unless a store is explicitly supplied.
+- Added store-reference envelopes for oversized payloads and wired fallback-aware APIs for raw envelopes, Responses reasoning items, and Anthropic signatures.
+- Added unit tests for under-limit inline behavior, disabled-store rejection, configured-store round-trip, Responses `encrypted_content` limits, and Anthropic prefixed signature limits.
 - Completed validation: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Marked M4-04 `[DONE]` in TODO.md with its completion record. Next step is committing the completed task changes.
+- Marked M4-05 `[DONE]` in `TODO.md` with its completion record. Next step is committing the completed task changes.

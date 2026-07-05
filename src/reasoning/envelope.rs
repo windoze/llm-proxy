@@ -18,6 +18,71 @@ const CHECKSUM_DOMAIN: &[u8] = b"llm-proxy.reasoning-envelope";
 const ANTHROPIC_SIGNATURE_PREFIX: &str = "llm_proxy_sig_v1:";
 const RESPONSES_REASONING_TYPE: &str = "reasoning";
 const RESPONSES_REASONING_ID_PREFIX: &str = "rs_llm_proxy";
+pub const DEFAULT_MAX_OPAQUE_FIELD_BYTES: usize = 512 * 1024;
+
+/// Maximum opaque field size allowed before the optional stateful fallback is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnvelopeLimits {
+    max_opaque_field_bytes: usize,
+}
+
+impl EnvelopeLimits {
+    /// Creates a size limit for final `encrypted_content` or `signature` field values.
+    pub const fn new(max_opaque_field_bytes: usize) -> Self {
+        Self {
+            max_opaque_field_bytes,
+        }
+    }
+
+    /// Returns the maximum byte length for the final opaque field value.
+    pub const fn max_opaque_field_bytes(&self) -> usize {
+        self.max_opaque_field_bytes
+    }
+
+    fn max_envelope_bytes(self, reserved_prefix_bytes: usize, field_name: &str) -> Result<usize> {
+        self.max_opaque_field_bytes
+            .checked_sub(reserved_prefix_bytes)
+            .ok_or_else(|| {
+                mapping_error(format!(
+                    "{field_name} prefix length {reserved_prefix_bytes} exceeds configured reasoning opaque field limit {}",
+                    self.max_opaque_field_bytes
+                ))
+            })
+    }
+}
+
+impl Default for EnvelopeLimits {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_OPAQUE_FIELD_BYTES)
+    }
+}
+
+/// Optional stateful fallback used only when an encoded envelope exceeds its limit.
+pub trait ReasoningStore {
+    /// Stores a source block under an id chosen by the envelope layer.
+    fn put(&self, id: &str, block: SourceBlock) -> Result<()>;
+
+    /// Loads a source block previously stored under the given id.
+    fn get(&self, id: &str) -> Result<SourceBlock>;
+}
+
+/// Store implementation used by default to preserve stateless behavior.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopStore;
+
+impl ReasoningStore for NoopStore {
+    fn put(&self, _id: &str, _block: SourceBlock) -> Result<()> {
+        Err(mapping_error(
+            "reasoning envelope exceeded configured length limit and no stateful ReasoningStore is enabled",
+        ))
+    }
+
+    fn get(&self, _id: &str) -> Result<SourceBlock> {
+        Err(mapping_error(
+            "stateful reasoning envelope reference cannot be resolved because no ReasoningStore is enabled",
+        ))
+    }
+}
 
 /// Serialized reasoning block plus the provider that can interpret it later.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +118,8 @@ pub struct Envelope {
     pub source: Provider,
     pub payload: Vec<u8>,
     pub checksum: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_ref: Option<String>,
 }
 
 impl Envelope {
@@ -69,12 +136,68 @@ impl Envelope {
             source: source_block.source.clone(),
             payload: source_block.payload.clone(),
             checksum,
+            store_ref: None,
+        }
+    }
+
+    /// Creates a compact envelope that points to a stateful store entry.
+    pub fn new_store_ref(source_block: &SourceBlock, store_ref: impl Into<String>) -> Self {
+        Self {
+            version: ENVELOPE_VERSION,
+            source: source_block.source.clone(),
+            payload: Vec::new(),
+            checksum: checksum(
+                ENVELOPE_VERSION,
+                &source_block.source,
+                &source_block.payload,
+            ),
+            store_ref: Some(store_ref.into()),
         }
     }
 
     /// Verifies integrity and converts the envelope back to its raw source block.
     pub fn into_source_block(self) -> Result<SourceBlock> {
-        let expected = checksum(self.version, &self.source, &self.payload);
+        if self.store_ref.is_some() {
+            return Err(mapping_error(
+                "stateful reasoning envelope requires a configured ReasoningStore",
+            ));
+        }
+
+        let source_block = SourceBlock::new(self.source.clone(), self.payload.clone());
+        self.verify_source_block(&source_block)?;
+
+        Ok(source_block)
+    }
+
+    /// Verifies an envelope, resolving a store reference when the fallback was used.
+    pub fn into_source_block_with_store<S: ReasoningStore + ?Sized>(
+        self,
+        store: &S,
+    ) -> Result<SourceBlock> {
+        let Some(store_ref) = self.store_ref.clone() else {
+            return self.into_source_block();
+        };
+
+        if !self.payload.is_empty() {
+            return Err(mapping_error(
+                "stateful reasoning envelope must not also carry an inline payload",
+            ));
+        }
+
+        let source_block = store.get(&store_ref)?;
+        self.verify_source_block(&source_block)?;
+
+        Ok(source_block)
+    }
+
+    fn verify_source_block(&self, source_block: &SourceBlock) -> Result<()> {
+        if source_block.source != self.source {
+            return Err(mapping_error(
+                "reasoning envelope store reference returned the wrong provider source",
+            ));
+        }
+
+        let expected = checksum(self.version, &self.source, &source_block.payload);
         if self.checksum != expected {
             return Err(mapping_error("reasoning envelope checksum mismatch"));
         }
@@ -86,31 +209,57 @@ impl Envelope {
             )));
         }
 
-        Ok(SourceBlock::new(self.source, self.payload))
+        Ok(())
     }
 }
 
 /// Encodes a provider source block into a base64 JSON envelope.
 pub fn wrap(source_block: &SourceBlock) -> Result<String> {
-    let envelope = Envelope::new(source_block);
-    encode_envelope(&envelope)
+    wrap_with_store(source_block, EnvelopeLimits::default(), &NoopStore)
+}
+
+/// Encodes a source block, using `store` only when the inline envelope is too large.
+pub fn wrap_with_store<S: ReasoningStore + ?Sized>(
+    source_block: &SourceBlock,
+    limits: EnvelopeLimits,
+    store: &S,
+) -> Result<String> {
+    let max_envelope_bytes = limits.max_envelope_bytes(0, "reasoning envelope")?;
+    encode_envelope_with_limit(source_block, max_envelope_bytes, store)
 }
 
 /// Decodes and verifies a base64 envelope, returning the original provider payload bytes.
 pub fn unwrap(encoded: &str) -> Result<SourceBlock> {
+    unwrap_with_store(encoded, &NoopStore)
+}
+
+/// Decodes an envelope, resolving stateful fallback references through `store`.
+pub fn unwrap_with_store<S: ReasoningStore + ?Sized>(
+    encoded: &str,
+    store: &S,
+) -> Result<SourceBlock> {
     let bytes = STANDARD
         .decode(encoded)
         .map_err(|err| mapping_error(format!("reasoning envelope is not valid base64: {err}")))?;
     let envelope: Envelope = serde_json::from_slice(&bytes)
         .map_err(|err| mapping_error(format!("reasoning envelope is not valid JSON: {err}")))?;
 
-    envelope.into_source_block()
+    envelope.into_source_block_with_store(store)
 }
 
 /// Wraps a source block as a Responses-compatible reasoning item.
 pub fn wrap_as_responses_reasoning_item(source_block: &SourceBlock) -> Result<Value> {
+    wrap_as_responses_reasoning_item_with_store(source_block, EnvelopeLimits::default(), &NoopStore)
+}
+
+/// Wraps a source block as a Responses reasoning item with optional store fallback.
+pub fn wrap_as_responses_reasoning_item_with_store<S: ReasoningStore + ?Sized>(
+    source_block: &SourceBlock,
+    limits: EnvelopeLimits,
+    store: &S,
+) -> Result<Value> {
     let envelope = Envelope::new(source_block);
-    let encrypted_content = encode_envelope(&envelope)?;
+    let encrypted_content = wrap_with_store(source_block, limits, store)?;
 
     let mut item = Map::new();
     item.insert(
@@ -132,6 +281,14 @@ pub fn wrap_as_responses_reasoning_item(source_block: &SourceBlock) -> Result<Va
 
 /// Extracts and verifies an envelope carried by a Responses reasoning item.
 pub fn unwrap_from_responses_reasoning_item(item: &Value) -> Result<SourceBlock> {
+    unwrap_from_responses_reasoning_item_with_store(item, &NoopStore)
+}
+
+/// Extracts a Responses reasoning envelope, resolving store references when configured.
+pub fn unwrap_from_responses_reasoning_item_with_store<S: ReasoningStore + ?Sized>(
+    item: &Value,
+    store: &S,
+) -> Result<SourceBlock> {
     let object = item
         .as_object()
         .ok_or_else(|| mapping_error("Responses reasoning item must be a JSON object"))?;
@@ -157,19 +314,39 @@ pub fn unwrap_from_responses_reasoning_item(item: &Value) -> Result<SourceBlock>
         "encrypted_content",
         "Responses reasoning item.encrypted_content",
     )?;
-    unwrap(encrypted_content)
+    unwrap_with_store(encrypted_content, store)
 }
 
 /// Wraps a source block as an Anthropic-compatible thinking signature string.
 pub fn wrap_as_signature(source_block: &SourceBlock) -> Result<String> {
-    Ok(format!(
-        "{ANTHROPIC_SIGNATURE_PREFIX}{}",
-        wrap(source_block)?
-    ))
+    wrap_as_signature_with_store(source_block, EnvelopeLimits::default(), &NoopStore)
+}
+
+/// Wraps a source block as an Anthropic signature with optional store fallback.
+pub fn wrap_as_signature_with_store<S: ReasoningStore + ?Sized>(
+    source_block: &SourceBlock,
+    limits: EnvelopeLimits,
+    store: &S,
+) -> Result<String> {
+    let max_envelope_bytes = limits.max_envelope_bytes(
+        ANTHROPIC_SIGNATURE_PREFIX.len(),
+        "Anthropic thinking signature",
+    )?;
+    let encoded = encode_envelope_with_limit(source_block, max_envelope_bytes, store)?;
+
+    Ok(format!("{ANTHROPIC_SIGNATURE_PREFIX}{}", encoded))
 }
 
 /// Extracts and verifies an envelope carried by an Anthropic thinking signature.
 pub fn unwrap_from_signature(signature: &str) -> Result<SourceBlock> {
+    unwrap_from_signature_with_store(signature, &NoopStore)
+}
+
+/// Extracts an Anthropic signature envelope, resolving store references when configured.
+pub fn unwrap_from_signature_with_store<S: ReasoningStore + ?Sized>(
+    signature: &str,
+    store: &S,
+) -> Result<SourceBlock> {
     let encoded = signature
         .strip_prefix(ANTHROPIC_SIGNATURE_PREFIX)
         .ok_or_else(|| {
@@ -184,7 +361,7 @@ pub fn unwrap_from_signature(signature: &str) -> Result<SourceBlock> {
         ));
     }
 
-    unwrap(encoded)
+    unwrap_with_store(encoded, store)
 }
 
 fn encode_envelope(envelope: &Envelope) -> Result<String> {
@@ -193,11 +370,47 @@ fn encode_envelope(envelope: &Envelope) -> Result<String> {
     Ok(STANDARD.encode(bytes))
 }
 
+fn encode_envelope_with_limit<S: ReasoningStore + ?Sized>(
+    source_block: &SourceBlock,
+    max_envelope_bytes: usize,
+    store: &S,
+) -> Result<String> {
+    let inline_envelope = Envelope::new(source_block);
+    let encoded = encode_envelope(&inline_envelope)?;
+    if encoded.len() <= max_envelope_bytes {
+        return Ok(encoded);
+    }
+
+    let store_ref = store_ref_id(&inline_envelope);
+    let reference_envelope = Envelope::new_store_ref(source_block, store_ref.clone());
+    let reference_encoded = encode_envelope(&reference_envelope)?;
+    if reference_encoded.len() > max_envelope_bytes {
+        return Err(mapping_error(format!(
+            "reasoning envelope store reference length {} exceeds configured limit {}",
+            reference_encoded.len(),
+            max_envelope_bytes
+        )));
+    }
+
+    store.put(&store_ref, source_block.clone())?;
+    Ok(reference_encoded)
+}
+
 fn responses_reasoning_item_id(envelope: &Envelope) -> String {
     format!(
         "{RESPONSES_REASONING_ID_PREFIX}_v{}_{}_{:08x}",
         envelope.version,
         source_tag(&envelope.source),
+        envelope.checksum
+    )
+}
+
+fn store_ref_id(envelope: &Envelope) -> String {
+    format!(
+        "rb_llm_proxy_v{}_{}_{:016x}_{:08x}",
+        envelope.version,
+        source_tag(&envelope.source),
+        envelope.payload.len(),
         envelope.checksum
     )
 }
@@ -250,9 +463,40 @@ fn required_string<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Mutex};
+
     use serde_json::json;
 
     use super::*;
+
+    const TEST_OPAQUE_LIMIT_BYTES: usize = 1024;
+
+    #[derive(Default)]
+    struct MemoryStore {
+        blocks: Mutex<HashMap<String, SourceBlock>>,
+    }
+
+    impl MemoryStore {
+        fn len(&self) -> usize {
+            self.blocks.lock().unwrap().len()
+        }
+    }
+
+    impl ReasoningStore for MemoryStore {
+        fn put(&self, id: &str, block: SourceBlock) -> Result<()> {
+            self.blocks.lock().unwrap().insert(id.to_owned(), block);
+            Ok(())
+        }
+
+        fn get(&self, id: &str) -> Result<SourceBlock> {
+            self.blocks
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .ok_or_else(|| mapping_error(format!("missing test source block `{id}`")))
+        }
+    }
 
     #[test]
     fn wraps_and_unwraps_responses_reasoning_item_json() {
@@ -317,6 +561,80 @@ mod tests {
         assert!(signature.starts_with(ANTHROPIC_SIGNATURE_PREFIX));
         assert!(signature.len() > ANTHROPIC_SIGNATURE_PREFIX.len() + 64);
         assert_eq!(unwrap_from_signature(&signature).unwrap(), source);
+    }
+
+    #[test]
+    fn inline_envelope_does_not_use_store_when_under_limit() {
+        let store = MemoryStore::default();
+        let limits = EnvelopeLimits::new(TEST_OPAQUE_LIMIT_BYTES);
+        let source = SourceBlock::new(
+            Provider::Responses,
+            br#"{"type":"reasoning","encrypted_content":"small"}"#.to_vec(),
+        );
+
+        let encoded = wrap_with_store(&source, limits, &store).unwrap();
+
+        assert_eq!(store.len(), 0);
+        assert_eq!(unwrap(&encoded).unwrap(), source);
+    }
+
+    #[test]
+    fn oversized_envelope_requires_explicit_store() {
+        let limits = EnvelopeLimits::new(TEST_OPAQUE_LIMIT_BYTES);
+        let source = SourceBlock::new(Provider::Responses, vec![b'x'; 4096]);
+
+        let err = wrap_with_store(&source, limits, &NoopStore).unwrap_err();
+
+        assert!(
+            matches!(err, ProxyError::ProtocolMapping(message) if message.contains("ReasoningStore"))
+        );
+    }
+
+    #[test]
+    fn oversized_envelope_round_trips_through_configured_store() {
+        let store = MemoryStore::default();
+        let limits = EnvelopeLimits::new(TEST_OPAQUE_LIMIT_BYTES);
+        let source = SourceBlock::new(Provider::Responses, vec![b'x'; 4096]);
+
+        let encoded = wrap_with_store(&source, limits, &store).unwrap();
+
+        assert!(encoded.len() <= limits.max_opaque_field_bytes());
+        assert_eq!(store.len(), 1);
+        assert!(
+            matches!(unwrap(&encoded).unwrap_err(), ProxyError::ProtocolMapping(message) if message.contains("ReasoningStore"))
+        );
+        assert_eq!(unwrap_with_store(&encoded, &store).unwrap(), source);
+    }
+
+    #[test]
+    fn responses_reasoning_item_store_fallback_respects_limit() {
+        let store = MemoryStore::default();
+        let limits = EnvelopeLimits::new(TEST_OPAQUE_LIMIT_BYTES);
+        let source = SourceBlock::new(Provider::Anthropic, vec![b't'; 4096]);
+
+        let item = wrap_as_responses_reasoning_item_with_store(&source, limits, &store).unwrap();
+        let encrypted_content = item["encrypted_content"].as_str().unwrap();
+
+        assert!(encrypted_content.len() <= limits.max_opaque_field_bytes());
+        assert_eq!(
+            unwrap_from_responses_reasoning_item_with_store(&item, &store).unwrap(),
+            source
+        );
+    }
+
+    #[test]
+    fn anthropic_signature_store_fallback_respects_prefixed_limit() {
+        let store = MemoryStore::default();
+        let limits = EnvelopeLimits::new(TEST_OPAQUE_LIMIT_BYTES);
+        let source = SourceBlock::new(Provider::Responses, vec![b's'; 4096]);
+
+        let signature = wrap_as_signature_with_store(&source, limits, &store).unwrap();
+
+        assert!(signature.len() <= limits.max_opaque_field_bytes());
+        assert_eq!(
+            unwrap_from_signature_with_store(&signature, &store).unwrap(),
+            source
+        );
     }
 
     #[test]
