@@ -115,7 +115,7 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - 所有类型已 derive `Debug, Clone, PartialEq` 并支持 serde 序列化/反序列化；因后续 M1 任务才会接入解析/编码，已对该 staged IR 模块添加局部 dead-code allowance，避免当前阶段 lint 噪音。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M1-02 `[TODO]` 定义 IR 统一请求 (`ir/request.rs`)
+### [DONE] M1-02 定义 IR 统一请求 (`ir/request.rs`)
 - `struct IrRequest { model:String, system:Option<Vec<ContentBlock>>, messages:Vec<Message>,
   tools:Vec<ToolDef>, tool_choice:ToolChoice, max_tokens:Option<u32>, temperature:Option<f32>,
   top_p:Option<f32>, top_k:Option<u32>, stop:Vec<String>, stream:bool,
@@ -126,6 +126,12 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - `enum StopReason { EndTurn, MaxTokens, StopSequence, ToolUse, Other(String) }`
 - `struct Usage { input_tokens:u32, output_tokens:u32, cache_read:Option<u32>, cache_write:Option<u32> }`
 映射依据见 DESIGN §6.5/§6.6。
+
+完成记录：
+- 2026-07-06：已在 `src/ir/request.rs` 定义 `IrRequest`、`ToolDef`、`ToolChoice`、`IrResponse`、`StopReason` 与 `Usage`，覆盖统一请求、非流式响应、停止原因与 token/cache usage 结构。
+- 所有新增 IR 类型已 derive `Debug, Clone, PartialEq, Serialize, Deserialize`，并为 staged IR 模块添加局部 dead-code allowance，等待后续 M1 解析/编码任务接入。
+- 新增单元测试覆盖 request/response serde 形状、provider `extra` 直通参数、工具选择、停止原因与 usage 字段。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M1-03 `[TODO]` 定义流式 IR event (`ir/event.rs`)
 `enum IrEvent`，至少含：
