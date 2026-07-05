@@ -194,11 +194,18 @@ SSE 响应且字节无损（可用 `curl` 对比）。确认目录结构与 PLAN
 - 新增单元测试覆盖 DeepSeek reasoning + tool_calls + tool result 映射、OpenAI 常规采样参数保留、DeepSeek `n>1` 拒绝、非法 tool arguments JSON 报错。
 - 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M1-07 `[TODO]` OpenAI Chat/DeepSeek 响应解析 (`protocol/openai_chat/decode.rs`)
+### [DONE] M1-07 OpenAI Chat/DeepSeek 响应解析 (`protocol/openai_chat/decode.rs`)
 实现 `chat_response_to_ir(body:&Value) -> Result<IrResponse>`（非流式）：
 `choices[0].message.content` → Text block；`reasoning_content` → Thinking；`tool_calls` → ToolUse；
 `finish_reason` → `StopReason`（`stop→EndTurn, length→MaxTokens, tool_calls→ToolUse`）；
 `usage` → `Usage`（含 `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` → cache_read/miss）。
+
+完成记录：
+- 2026-07-06：已实现 `chat_response_to_ir`，解析非流式 OpenAI Chat/DeepSeek 响应的首个 choice，输出 `IrResponse`。
+- 已覆盖 assistant `content` → Text、DeepSeek `reasoning_content` → `Thinking{source:DeepSeek, echo_policy:OnlyWithToolCall}`、`tool_calls` → `ToolUse`，以及 `finish_reason` 到 `StopReason` 的 `stop`/`length`/`tool_calls` 映射。
+- 已解析 `usage.prompt_tokens`/`completion_tokens` 到 `Usage.input_tokens`/`output_tokens`，并将 DeepSeek `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` 映射到 `cache_read`/`cache_write`。
+- 新增单元测试覆盖 DeepSeek reasoning + tool_calls + cache usage 响应，以及普通 text 响应的 `stop`/`length` 停止原因和无 cache usage 场景。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M1-08 `[TODO]` M1 单元测试
 在 `protocol/openai_chat/` 加 `#[cfg(test)]`：准备 DeepSeek 响应 JSON 样本

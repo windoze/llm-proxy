@@ -8,8 +8,8 @@ use serde_json::{Map, Number, Value};
 use crate::{
     error::{ProxyError, Result},
     ir::{
-        message::{ContentBlock, ImageSource, Message, Provider, Role, Thinking},
-        request::{IrRequest, ToolChoice, ToolDef},
+        message::{ContentBlock, EchoPolicy, ImageSource, Message, Provider, Role, Thinking},
+        request::{IrRequest, IrResponse, StopReason, ToolChoice, ToolDef, Usage},
     },
     provider::CapabilityProfile,
 };
@@ -79,6 +79,35 @@ pub fn chat_request_to_ir(body: &Value, profile: &dyn CapabilityProfile) -> Resu
         stop: decode_stop(request.get("stop"))?,
         stream: optional_bool(request, "stream")?.unwrap_or(false),
         extra: collect_extra(request, profile, blocklist)?,
+    })
+}
+
+/// Converts a non-streaming OpenAI Chat Completions response into the provider-neutral IR.
+pub fn chat_response_to_ir(body: &Value) -> Result<IrResponse> {
+    let response = body
+        .as_object()
+        .ok_or_else(|| mapping_error("response body must be a JSON object"))?;
+    let choices = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| mapping_error("response.choices must be an array"))?;
+    let first_choice = choices
+        .first()
+        .ok_or_else(|| mapping_error("response.choices must contain at least one choice"))?;
+    let first_choice = first_choice
+        .as_object()
+        .ok_or_else(|| mapping_error("response.choices[0] must be an object"))?;
+    let message = first_choice
+        .get("message")
+        .and_then(Value::as_object)
+        .ok_or_else(|| mapping_error("response.choices[0].message must be an object"))?;
+
+    Ok(IrResponse {
+        id: required_string(response, "id", "response.id")?.to_owned(),
+        model: required_string(response, "model", "response.model")?.to_owned(),
+        content: decode_response_message_content(message)?,
+        stop_reason: decode_finish_reason(first_choice.get("finish_reason"))?,
+        usage: decode_usage(response.get("usage"))?,
     })
 }
 
@@ -173,6 +202,75 @@ fn decode_assistant_content(
     Ok(content)
 }
 
+fn decode_response_message_content(message: &Map<String, Value>) -> Result<Vec<ContentBlock>> {
+    let tool_calls = decode_tool_calls(
+        message.get("tool_calls"),
+        "response.choices[0].message.tool_calls".to_owned(),
+    )?;
+    let reasoning = decode_deepseek_reasoning_content(
+        message.get("reasoning_content"),
+        "response.choices[0].message.reasoning_content".to_owned(),
+        EchoPolicy::OnlyWithToolCall,
+    )?;
+    let mut content = Vec::new();
+    let has_reasoning = reasoning.is_some();
+    let has_tool_calls = !tool_calls.is_empty();
+
+    if let Some(reasoning) = reasoning {
+        content.push(reasoning);
+    }
+
+    match message.get("content") {
+        Some(Value::Null) | None if has_tool_calls || has_reasoning => {}
+        content_value => content.extend(decode_required_content(
+            content_value,
+            "response.choices[0].message.content",
+        )?),
+    }
+
+    content.extend(tool_calls);
+    Ok(content)
+}
+
+fn decode_finish_reason(value: Option<&Value>) -> Result<StopReason> {
+    let finish_reason = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| mapping_error("response.choices[0].finish_reason must be a string"))?;
+
+    Ok(match finish_reason {
+        "stop" => StopReason::EndTurn,
+        "length" => StopReason::MaxTokens,
+        "tool_calls" | "function_call" => StopReason::ToolUse,
+        "stop_sequence" => StopReason::StopSequence,
+        other => StopReason::Other(other.to_owned()),
+    })
+}
+
+fn decode_usage(value: Option<&Value>) -> Result<Usage> {
+    let usage = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| mapping_error("response.usage must be an object"))?;
+
+    Ok(Usage {
+        input_tokens: required_u32(usage, "prompt_tokens", "response.usage.prompt_tokens")?,
+        output_tokens: required_u32(
+            usage,
+            "completion_tokens",
+            "response.usage.completion_tokens",
+        )?,
+        cache_read: optional_u32(
+            usage,
+            "prompt_cache_hit_tokens",
+            "response.usage.prompt_cache_hit_tokens",
+        )?,
+        cache_write: optional_u32(
+            usage,
+            "prompt_cache_miss_tokens",
+            "response.usage.prompt_cache_miss_tokens",
+        )?,
+    })
+}
+
 fn decode_tool_result(message: &Map<String, Value>, index: usize) -> Result<ContentBlock> {
     let tool_use_id = required_string(
         message,
@@ -259,12 +357,20 @@ fn decode_reasoning_content(
     profile: &dyn CapabilityProfile,
     model: &str,
 ) -> Result<Option<ContentBlock>> {
+    decode_deepseek_reasoning_content(value, path, profile.reasoning_echo_policy(model))
+}
+
+fn decode_deepseek_reasoning_content(
+    value: Option<&Value>,
+    path: String,
+    echo_policy: EchoPolicy,
+) -> Result<Option<ContentBlock>> {
     match value {
         Some(Value::String(text)) => Ok(Some(ContentBlock::Thinking(Thinking {
             text: Some(text.clone()),
             opaque: None,
             source: Provider::DeepSeek,
-            echo_policy: profile.reasoning_echo_policy(model),
+            echo_policy,
         }))),
         Some(Value::Null) | None => Ok(None),
         Some(_) => Err(mapping_error(format!("{path} must be a string"))),
@@ -528,6 +634,12 @@ fn optional_u32(
     }
 }
 
+fn required_u32(object: &Map<String, Value>, field: &str, path: impl Into<String>) -> Result<u32> {
+    let path = path.into();
+    optional_u32(object, field, path.clone())
+        .and_then(|value| value.ok_or_else(|| mapping_error(format!("{path} is required"))))
+}
+
 fn optional_bool(object: &Map<String, Value>, field: &str) -> Result<Option<bool>> {
     match object.get(field) {
         Some(Value::Bool(value)) => Ok(Some(*value)),
@@ -733,6 +845,118 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn decodes_deepseek_response_with_reasoning_tools_and_usage() {
+        let body = json!({
+            "id": "chatcmpl_1",
+            "model": "deepseek-reasoner",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "I need the weather tool.",
+                    "content": "Calling the weather tool.",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup_weather",
+                            "arguments": "{\"city\":\"Paris\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 9,
+                "total_tokens": 51,
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 32
+            }
+        });
+
+        let response = chat_response_to_ir(&body).unwrap();
+
+        assert_eq!(
+            response,
+            IrResponse {
+                id: "chatcmpl_1".to_owned(),
+                model: "deepseek-reasoner".to_owned(),
+                content: vec![
+                    ContentBlock::Thinking(Thinking {
+                        text: Some("I need the weather tool.".to_owned()),
+                        opaque: None,
+                        source: Provider::DeepSeek,
+                        echo_policy: EchoPolicy::OnlyWithToolCall,
+                    }),
+                    ContentBlock::Text {
+                        text: "Calling the weather tool.".to_owned()
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_1".to_owned(),
+                        name: "lookup_weather".to_owned(),
+                        input: json!({ "city": "Paris" })
+                    }
+                ],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 42,
+                    output_tokens: 9,
+                    cache_read: Some(10),
+                    cache_write: Some(32),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_text_response_finish_reasons_and_usage_without_cache() {
+        for (finish_reason, expected_stop_reason) in [
+            ("stop", StopReason::EndTurn),
+            ("length", StopReason::MaxTokens),
+        ] {
+            let body = json!({
+                "id": format!("chatcmpl_{finish_reason}"),
+                "model": "gpt-4.1",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "done"
+                    },
+                    "finish_reason": finish_reason
+                }],
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 10
+                }
+            });
+
+            let response = chat_response_to_ir(&body).unwrap();
+
+            assert_eq!(response.id, format!("chatcmpl_{finish_reason}"));
+            assert_eq!(response.model, "gpt-4.1");
+            assert_eq!(
+                response.content,
+                vec![ContentBlock::Text {
+                    text: "done".to_owned()
+                }]
+            );
+            assert_eq!(response.stop_reason, expected_stop_reason);
+            assert_eq!(
+                response.usage,
+                Usage {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    cache_read: None,
+                    cache_write: None,
+                }
+            );
+        }
     }
 
     #[test]
