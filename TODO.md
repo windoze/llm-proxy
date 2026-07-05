@@ -661,8 +661,14 @@ Responses decoder + Anthropic encoder 路径：Codex 回传 reasoning item 的 e
 - 新增单元测试覆盖 Codex 省略 `id/status` 后的 envelope 还原、gateway envelope 篡改拒绝、Anthropic request 中原始 thinking signature 编码，以及错误 source 的拒绝路径。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M6-05 `[TODO]` 富↔富流式 (Anthropic SSE ↔ Responses SSE)
+### [DONE] M6-05 富↔富流式 (Anthropic SSE ↔ Responses SSE)
 Anthropic SSE → IR event → Responses SSE，index/类型对齐。
+
+完成记录：
+- 2026-07-06：已完成 Anthropic SSE → IR event → Responses SSE 富↔富流式桥接验证，覆盖 thinking/text/tool_use block 的顺序、Responses `output_index` 与 IR block index 对齐，以及 Responses SSE item 类型输出。
+- 已修复 streaming Anthropic thinking metadata 的 envelope 编码：`ThinkingMetadata{source=Anthropic}` 不再只包装 signature 字节，而是在 reasoning block 结束时把完整 Anthropic `thinking` block（thinking text + 原始 signature）写入 Responses `encrypted_content` envelope，保证 Codex 后续回传可还原真实 Anthropic signature。
+- 新增 targeted 单元测试覆盖 Responses SSE encoder 的 Anthropic reasoning envelope，以及完整 Anthropic SSE → IR event → Responses SSE 桥接，断言 tool call arguments、usage、block index 与 envelope payload 保真。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M6-06 `[TODO]` 可选：Anthropic 后端 cache_control 注入
 纯函数从消息结构算 cache 断点，注入 Anthropic 请求省钱（DESIGN §3.1）。无状态。可作为可配置开关。

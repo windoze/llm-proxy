@@ -1,13 +1,23 @@
 # Execution plan
 
-I will follow `TODO.md` as the source of truth, select the first task whose heading is not prefixed with `[DONE]`, complete exactly that task, update its completion record, commit the result, and stop.
+I will complete exactly the first incomplete task listed in `TODO.md`, using `TODO.md` as the source of truth for ordering, requirements, dependencies, validation, and completion records.
 
-Current task: M6-04, restoring Codex-returned Responses `reasoning.encrypted_content` into Anthropic `thinking` blocks with the original signature for chain 2.
+## Step-by-step plan
 
-Steps:
-1. Inspect the Responses decoder, Anthropic encoder, envelope helpers, and related tests/snapshots to locate the existing one-way M6-03 encoding path and the M4/M5 reverse paths to mirror.
-2. Added decoding support so Responses reasoning items containing llm-proxy Anthropic envelopes unwrap to IR `Thinking{source:Anthropic, opaque:signature, echo_policy:Always}` instead of remaining opaque Responses reasoning.
-3. Added an Anthropic backend request encoder path that emits restored Anthropic-origin IR thinking blocks as `thinking` content blocks with the original signature, and rejects non-Anthropic thinking for real Anthropic backend calls.
-4. Added focused unit tests covering encrypted_content envelope restoration, tamper rejection, Anthropic request encoding, and wrong-source rejection.
-5. Completed validation with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-6. Marked M6-04 `[DONE]` in `TODO.md` with the implementation and validation record; next step is committing all related changes with the required co-author trailer, then stopping.
+1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
+2. Check the latest commit message only for unfinished work that is directly relevant to that selected task.
+3. Read the selected task details and any immediately relevant project files needed to implement it.
+4. Implement the task as written, without narrowing scope or using workarounds.
+5. Run formatting, linting, and tests required by the task and repository conventions, addressing any unscheduled failures that appear.
+6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and filling in its completion record. Update `PLAN.md` only if phase-level sequencing or criteria actually change.
+7. Commit all changes for this task with a descriptive message and the required co-author trailer.
+8. Stop after this single task is completed and committed.
+
+## Progress log
+
+- Created the initial execution plan before running repository inspection or implementation commands.
+- Identified the first incomplete task as `M6-05`: implement Anthropic SSE -> IR event -> Responses SSE rich-to-rich streaming with aligned indexes and block types.
+- Completed baseline validation before code changes: formatting check, clippy, and the full test suite passed.
+- Current implementation focus: ensure streaming Anthropic thinking metadata is encoded into Responses `encrypted_content` as a full Anthropic thinking block envelope, then add end-to-end stream bridge coverage.
+- Implemented the streaming envelope fix and added targeted tests for both the Responses SSE encoder and the full Anthropic SSE -> IR -> Responses SSE bridge. Targeted tests passed.
+- Full validation passed after the implementation. `TODO.md` now marks `M6-05` as `[DONE]` with a completion record.

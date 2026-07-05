@@ -672,10 +672,12 @@ fn mapping_error(message: impl Into<String>) -> ProxyError {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use futures_util::stream;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
+    use crate::protocol::responses::stream::ir_events_to_responses_sse;
 
     fn decode_events(events: &[(&str, Value)]) -> Result<Vec<IrEvent>> {
         let mut decoder = AnthropicStreamDecoder::new();
@@ -987,5 +989,248 @@ mod tests {
                 IrEvent::MessageStop,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn stream_wrapper_feeds_responses_sse_with_anthropic_reasoning_envelope() {
+        let events = stream::iter([
+            Ok(SseEvent {
+                event_type: MESSAGE_START.to_owned(),
+                data: message_start().to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_START.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_START,
+                    "index": 0,
+                    "content_block": {
+                        "type": "thinking",
+                        "thinking": ""
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_DELTA.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_DELTA,
+                    "index": 0,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": "Need "
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_DELTA.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_DELTA,
+                    "index": 0,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": "weather."
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_DELTA.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_DELTA,
+                    "index": 0,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": "sig_real_anthropic_stream"
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_STOP.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_STOP,
+                    "index": 0
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_START.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_START,
+                    "index": 1,
+                    "content_block": {
+                        "type": "text",
+                        "text": ""
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_DELTA.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_DELTA,
+                    "index": 1,
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "Calling the weather tool."
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_STOP.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_STOP,
+                    "index": 1
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_START.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_START,
+                    "index": 2,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_weather_stream",
+                        "name": "lookup_weather",
+                        "input": {}
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_DELTA.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_DELTA,
+                    "index": 2,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": "{\"city\""
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_DELTA.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_DELTA,
+                    "index": 2,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": ":\"Paris\"}"
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: CONTENT_BLOCK_STOP.to_owned(),
+                data: json!({
+                    "type": CONTENT_BLOCK_STOP,
+                    "index": 2
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: MESSAGE_DELTA.to_owned(),
+                data: json!({
+                    "type": MESSAGE_DELTA,
+                    "delta": {
+                        "stop_reason": "tool_use",
+                        "stop_sequence": null
+                    },
+                    "usage": {
+                        "output_tokens": 9
+                    }
+                })
+                .to_string(),
+            }),
+            Ok(SseEvent {
+                event_type: MESSAGE_STOP.to_owned(),
+                data: json!({
+                    "type": MESSAGE_STOP
+                })
+                .to_string(),
+            }),
+        ]);
+
+        let ir_events = anthropic_sse_to_ir_events(events);
+        let frames = ir_events_to_responses_sse(ir_events)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let parsed = frames.into_iter().map(parse_sse_frame).collect::<Vec<_>>();
+
+        assert_eq!(parsed[0].0, "response.created");
+        assert_eq!(parsed[1].0, "response.in_progress");
+        assert!(parsed.iter().any(|(event_type, data)| {
+            event_type == "response.output_item.added"
+                && data["output_index"] == json!(1)
+                && data["item"]["type"] == json!("message")
+        }));
+        assert!(parsed.iter().any(|(event_type, data)| {
+            event_type == "response.output_item.added"
+                && data["output_index"] == json!(2)
+                && data["item"]["type"] == json!("function_call")
+                && data["item"]["call_id"] == json!("toolu_weather_stream")
+                && data["item"]["name"] == json!("lookup_weather")
+        }));
+
+        let reasoning_done = parsed
+            .iter()
+            .find(|(event_type, data)| {
+                event_type == "response.output_item.done" && data["output_index"] == json!(0)
+            })
+            .expect("expected completed reasoning item");
+        let source_block = crate::reasoning::envelope::unwrap_from_responses_reasoning_item(
+            &reasoning_done.1["item"],
+        )
+        .unwrap();
+
+        assert_eq!(source_block.source, Provider::Anthropic);
+        assert_eq!(
+            source_block.payload_json().unwrap(),
+            json!({
+                "type": "thinking",
+                "thinking": "Need weather.",
+                "signature": "sig_real_anthropic_stream"
+            })
+        );
+
+        let completed = parsed
+            .iter()
+            .find(|(event_type, _)| event_type == "response.completed")
+            .expect("expected completed response");
+        assert_eq!(completed.1["response"]["status"], "completed");
+        assert_eq!(completed.1["response"]["output"][0]["type"], "reasoning");
+        assert_eq!(
+            completed.1["response"]["output"][1]["content"][0]["text"],
+            "Calling the weather tool."
+        );
+        assert_eq!(
+            completed.1["response"]["output"][2]["arguments"],
+            "{\"city\":\"Paris\"}"
+        );
+        assert_eq!(completed.1["response"]["usage"]["input_tokens"], 42);
+        assert_eq!(completed.1["response"]["usage"]["output_tokens"], 9);
+    }
+
+    fn parse_sse_frame(bytes: Bytes) -> (String, Value) {
+        let frame = std::str::from_utf8(&bytes).unwrap();
+        let mut event_type = None;
+        let mut data = None;
+
+        for line in frame.lines() {
+            if let Some(value) = line.strip_prefix("event: ") {
+                event_type = Some(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("data: ") {
+                data = Some(serde_json::from_str(value).unwrap());
+            }
+        }
+
+        (event_type.unwrap(), data.unwrap())
     }
 }

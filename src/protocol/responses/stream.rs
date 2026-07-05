@@ -99,7 +99,13 @@ struct ReasoningBlockState {
     output_index: usize,
     item_id: String,
     text: String,
-    encrypted_content: Option<String>,
+    metadata: Option<ReasoningMetadataState>,
+}
+
+#[derive(Debug, PartialEq)]
+struct ReasoningMetadataState {
+    source: Provider,
+    opaque: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -228,7 +234,7 @@ impl ResponsesStreamEncoder {
                     output_index,
                     item_id: item_id.clone(),
                     text: String::new(),
-                    encrypted_content: None,
+                    metadata: None,
                 });
                 (
                     state,
@@ -331,16 +337,19 @@ impl ResponsesStreamEncoder {
         source: &Provider,
         opaque: &[u8],
     ) -> Result<Vec<(&'static str, Value)>> {
-        let encrypted_content = encode_reasoning_encrypted_content(source, opaque)?;
+        let metadata = ReasoningMetadataState {
+            source: source.clone(),
+            opaque: opaque.to_vec(),
+        };
         let state = self.reasoning_block_mut(index, "thinking_metadata")?;
 
-        match &state.encrypted_content {
-            Some(existing) if existing != &encrypted_content => Err(mapping_error(format!(
+        match &state.metadata {
+            Some(existing) if existing != &metadata => Err(mapping_error(format!(
                 "thinking metadata changed for reasoning block index {index}"
             ))),
             Some(_) => Ok(Vec::new()),
             None => {
-                state.encrypted_content = Some(encrypted_content);
+                state.metadata = Some(metadata);
                 Ok(Vec::new())
             }
         }
@@ -420,11 +429,12 @@ impl ResponsesStreamEncoder {
         &mut self,
         state: ReasoningBlockState,
     ) -> Result<Vec<(&'static str, Value)>> {
+        let encrypted_content = encode_reasoning_encrypted_content(&state)?;
         let completed_item = encode_reasoning_item(
             &state.item_id,
             "completed",
             Some(&state.text),
-            state.encrypted_content.as_deref(),
+            encrypted_content.as_deref(),
         );
         self.remember_completed_item(state.output_index, completed_item.clone())?;
 
@@ -742,16 +752,36 @@ fn encode_tool_use_item(
     })
 }
 
-fn encode_reasoning_encrypted_content(source: &Provider, opaque: &[u8]) -> Result<String> {
-    match source {
-        Provider::Responses => std::str::from_utf8(opaque)
+fn encode_reasoning_encrypted_content(state: &ReasoningBlockState) -> Result<Option<String>> {
+    let Some(metadata) = &state.metadata else {
+        return Ok(None);
+    };
+
+    match &metadata.source {
+        Provider::Responses => std::str::from_utf8(&metadata.opaque)
             .map(str::to_owned)
+            .map(Some)
             .map_err(|err| {
                 mapping_error(format!(
                     "Responses reasoning encrypted_content metadata must be valid UTF-8: {err}"
                 ))
             }),
-        Provider::Anthropic => wrap(&SourceBlock::new(Provider::Anthropic, opaque)),
+        Provider::Anthropic => {
+            let signature = std::str::from_utf8(&metadata.opaque).map_err(|err| {
+                mapping_error(format!(
+                    "Anthropic thinking signature metadata must be valid UTF-8: {err}"
+                ))
+            })?;
+            let source_block = SourceBlock::from_json(
+                Provider::Anthropic,
+                &json!({
+                    "type": "thinking",
+                    "thinking": state.text.as_str(),
+                    "signature": signature,
+                }),
+            )?;
+            wrap(&source_block).map(Some)
+        }
         other => Err(mapping_error(format!(
             "thinking metadata from source {other:?} cannot be encoded as Responses encrypted_content"
         ))),
@@ -1013,6 +1043,58 @@ mod tests {
             .unwrap();
 
         assert_eq!(item_done.1["item"]["encrypted_content"], "enc_stream");
+    }
+
+    #[test]
+    fn encodes_anthropic_thinking_metadata_as_full_reasoning_envelope() {
+        let events = vec![
+            IrEvent::MessageStart {
+                id: "resp_anthropic_reasoning".to_owned(),
+                model: "claude-sonnet-4-5".to_owned(),
+            },
+            IrEvent::BlockStart {
+                index: 0,
+                block: BlockKind::Thinking,
+            },
+            IrEvent::ThinkingDelta {
+                index: 0,
+                text: "Need ".to_owned(),
+            },
+            IrEvent::ThinkingDelta {
+                index: 0,
+                text: "weather.".to_owned(),
+            },
+            IrEvent::ThinkingMetadata {
+                index: 0,
+                source: Provider::Anthropic,
+                opaque: b"sig_real_anthropic_stream".to_vec(),
+            },
+            IrEvent::BlockStop { index: 0 },
+            IrEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+            },
+            IrEvent::MessageStop,
+        ];
+
+        let encoded = encode_events(&events).unwrap();
+        let item_done = encoded
+            .iter()
+            .find(|(event_type, _)| event_type == RESPONSE_OUTPUT_ITEM_DONE)
+            .unwrap();
+        let source_block =
+            crate::reasoning::envelope::unwrap_from_responses_reasoning_item(&item_done.1["item"])
+                .unwrap();
+
+        assert_eq!(source_block.source, Provider::Anthropic);
+        assert_eq!(
+            source_block.payload_json().unwrap(),
+            json!({
+                "type": "thinking",
+                "thinking": "Need weather.",
+                "signature": "sig_real_anthropic_stream"
+            })
+        );
     }
 
     #[tokio::test]
