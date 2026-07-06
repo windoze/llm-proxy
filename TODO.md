@@ -804,6 +804,12 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - CI 步骤按 `TESTING.md` §1 运行 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets`，未添加 `--ignored`，因此默认跳过真实 CLI / 真实后端 e2e 测试。
 - 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M7-RV `[TODO]` 【Review】M7 加固 + 项目验收
+### [DONE] M7-RV 【Review】M7 加固 + 项目验收
 确认：多后端配置化可用、错误可读、有基本可观测性、回归套件通过。
 最终核对整个项目未偏离 DESIGN.md 的无状态铁律与保真目标。列出所有遗留 `[BLOCKED]` 项与后续建议。
+
+完成记录：
+- 2026-07-06：已完成 M7 加固与项目验收复核；确认配置文件 + 环境变量覆盖、模型别名/隐式路由、Chat/Responses/Anthropic 多后端装配、协议化错误响应、`Retry-After`/限流头翻译、结构化 observability 与脱敏 dump、后端重试/超时/并发控制、README/TESTING 文档与 GitHub CI 均已覆盖 M7 验收面。
+- 已复核无状态铁律与 reasoning/tool-use 保真路径：运行期仅保留请求局部路由/观测上下文、请求局部 tool ID 映射和并发 permit；reasoning store fallback 仅是显式 trait 接口且默认 `NoopStore`，主路径无 DB/Redis/会话存储；Responses 后端请求强制 `store=false` 并包含 `reasoning.encrypted_content`，Anthropic `signature` 与 Responses `encrypted_content` 通过 envelope 在客户端回传字段中无状态往返。
+- 遗留 `[BLOCKED]` 项：无。后续建议：真实 Claude Code / Codex CLI 与真实后端凭据相关的 ignored e2e 按 `TESTING.md` 在人工/受控环境周期性运行，尤其在客户端 CLI 配置格式或供应商协议更新后复核。
+- 验证：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过（207 passed，0 failed，0 ignored）。
