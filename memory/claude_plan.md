@@ -23,4 +23,4 @@ I will use `TODO.md` as the source of truth, complete exactly the first incomple
 - Implementation plan: add global backend request configuration, centralize backend HTTP send/retry/concurrency handling in a provider module, wire it into Chat/Responses/Anthropic backend calls, add targeted tests for retries, `Retry-After`, timeout, and stream-held concurrency permits, then update `TODO.md` and commit.
 - Implemented backend request controls in `provider::backend_request`, wired them into Chat, Responses, and Anthropic backend calls, and added config/env support for retries, backoff, timeout, and concurrency.
 - Validation passed after changes: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `cargo test --all --all-targets`.
-- Next step: mark `M7-06` done in `TODO.md`, include the completion record, and commit all task changes.
+- Marked `M7-06` done in `TODO.md` and committed the implementation as `638c4c7 [M7-06] Add backend retry controls`.
