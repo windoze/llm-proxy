@@ -780,9 +780,14 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 与既有链 1/链 3 plain text、reasoning、tool-use/multiturn SSE 快照合并后，4 条链的文本、reasoning、tool-use、多轮关键形状均由 committed `insta` snapshot 锁定，且不依赖真实网络或凭据。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets --quiet` 通过；变更后 `cargo fmt --all`、`INSTA_UPDATE=always cargo test --all --all-targets --quiet`、`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets --quiet` 均通过。
 
-### M7-08 `[TODO]` README 与部署文档
+### [DONE] M7-08 README 与部署文档
 写 `README.md`：配置示例、如何把 Claude Code / Codex 指向本网关、支持的后端与 profile、已知限制。
 指向 `TESTING.md`（测试与真实世界联调）。
+
+完成记录：
+- 2026-07-06：已新增根 `README.md`，包含项目概览、前端端点、四条链路、快速启动、配置文件示例、环境变量说明与部署运行示例。
+- 已补充 Claude Code / Codex 指向本网关的方法，并列出当前支持的 backend type/profile、模型别名路由规则、observability dump 注意事项和已知限制。
+- README 已明确指向 `TESTING.md`，说明无网络本地验证命令与真实 CLI/真实后端联调流程；本任务仅修改文档与任务记录，未改编译产物，沿用 M7-07 绿色 `cargo fmt`/`cargo clippy`/`cargo test` 结果，未重新运行完整套件。
 
 ### M7-09 `[TODO]` GitHub CI pipeline
 在 `.github/workflows/ci.yml` 建 GitHub Actions pipeline，push / PR 到 `main` 时触发：
