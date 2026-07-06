@@ -789,7 +789,7 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 已补充 Claude Code / Codex 指向本网关的方法，并列出当前支持的 backend type/profile、模型别名路由规则、observability dump 注意事项和已知限制。
 - README 已明确指向 `TESTING.md`，说明无网络本地验证命令与真实 CLI/真实后端联调流程；本任务仅修改文档与任务记录，未改编译产物，沿用 M7-07 绿色 `cargo fmt`/`cargo clippy`/`cargo test` 结果，未重新运行完整套件。
 
-### M7-09 `[TODO]` GitHub CI pipeline
+### [DONE] M7-09 GitHub CI pipeline
 在 `.github/workflows/ci.yml` 建 GitHub Actions pipeline，push / PR 到 `main` 时触发：
 - 步骤：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets`。
 - 用稳定版 Rust（edition 2024 需足够新的工具链），并缓存 cargo registry / target 加速。
@@ -797,6 +797,12 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
   端到端测试（`TESTING.md` §5）都标了 `#[ignore]`，CI 环境无这些 CLI / 无 `.envrc` 凭据，
   必须默认跳过，避免失败与凭据泄露。
 参考 `TESTING.md` §1（CI 跑的测试范围）与 §5.4（e2e 测试为何默认忽略）。
+
+完成记录：
+- 2026-07-06：已新增 `.github/workflows/ci.yml`，在 push / pull_request 到 `main` 时运行 GitHub Actions CI。
+- CI 使用稳定版 Rust，并显式安装 `clippy` / `rustfmt`；通过 `actions/cache@v4` 缓存 Cargo registry、Cargo git checkout 与 `target/`。
+- CI 步骤按 `TESTING.md` §1 运行 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets`，未添加 `--ignored`，因此默认跳过真实 CLI / 真实后端 e2e 测试。
+- 验证：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
 ### M7-RV `[TODO]` 【Review】M7 加固 + 项目验收
 确认：多后端配置化可用、错误可读、有基本可观测性、回归套件通过。
