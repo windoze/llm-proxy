@@ -1,0 +1,42 @@
+---
+source: src/main.rs
+expression: "serde_json::to_string_pretty(&second_body).unwrap()"
+---
+{
+  "created_at": 0,
+  "error": null,
+  "id": "msg_chain2_final",
+  "incomplete_details": null,
+  "model": "claude-sonnet-4-5",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "No umbrella needed.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_msg_chain2_final_0",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "status": "completed",
+  "store": false,
+  "usage": {
+    "input_tokens": 52,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 5,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 57
+  }
+}

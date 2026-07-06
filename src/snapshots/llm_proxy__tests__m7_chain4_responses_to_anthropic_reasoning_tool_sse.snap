@@ -1,0 +1,36 @@
+---
+source: src/main.rs
+expression: body
+---
+event: message_start
+data: {"message":{"content":[],"id":"resp_chain4_stream","model":"gpt-5.1","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
+
+event: content_block_start
+data: {"content_block":{"signature":"","thinking":"","type":"thinking"},"index":0,"type":"content_block_start"}
+
+event: content_block_delta
+data: {"delta":{"thinking":"Need weather.","type":"thinking_delta"},"index":0,"type":"content_block_delta"}
+
+event: content_block_delta
+data: {"delta":{"signature":"llm_proxy_sig_v1:eyJ2ZXJzaW9uIjoxLCJzb3VyY2UiOiJyZXNwb25zZXMiLCJwYXlsb2FkIjpbMTAxLDExMCw5OSw0NSwxMTUsMTE2LDExNCwxMDEsOTcsMTA5LDQ1LDExOSwxMDEsOTcsMTE2LDEwNCwxMDEsMTE0XSwiY2hlY2tzdW0iOjIzNTkwOTI4ODZ9","type":"signature_delta"},"index":0,"type":"content_block_delta"}
+
+event: content_block_stop
+data: {"index":0,"type":"content_block_stop"}
+
+event: content_block_start
+data: {"content_block":{"id":"call_weather_stream","input":{},"name":"lookup_weather","type":"tool_use"},"index":1,"type":"content_block_start"}
+
+event: content_block_delta
+data: {"delta":{"partial_json":"{\"city\"","type":"input_json_delta"},"index":1,"type":"content_block_delta"}
+
+event: content_block_delta
+data: {"delta":{"partial_json":":\"Paris\"}","type":"input_json_delta"},"index":1,"type":"content_block_delta"}
+
+event: content_block_stop
+data: {"index":1,"type":"content_block_stop"}
+
+event: message_delta
+data: {"delta":{"stop_reason":"tool_use","stop_sequence":null},"type":"message_delta","usage":{"input_tokens":20,"output_tokens":8}}
+
+event: message_stop
+data: {"type":"message_stop"}

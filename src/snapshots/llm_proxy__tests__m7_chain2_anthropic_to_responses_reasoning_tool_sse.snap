@@ -1,0 +1,45 @@
+---
+source: src/main.rs
+expression: normalize_created_at_fields(body)
+---
+event: response.created
+data: {"response":{"created_at":0,"error":null,"id":"msg_chain2_stream","incomplete_details":null,"model":"claude-sonnet-4-5","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"status":"in_progress","store":false,"usage":null},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"created_at":0,"error":null,"id":"msg_chain2_stream","incomplete_details":null,"model":"claude-sonnet-4-5","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"status":"in_progress","store":false,"usage":null},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"rs_msg_chain2_stream_0","status":"in_progress","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"rs_msg_chain2_stream_0","output_index":0,"part":{"text":"","type":"reasoning_text"},"sequence_number":3,"type":"response.content_part.added"}
+
+event: response.reasoning_text.delta
+data: {"content_index":0,"delta":"Need weather.","item_id":"rs_msg_chain2_stream_0","output_index":0,"sequence_number":4,"type":"response.reasoning_text.delta"}
+
+event: response.reasoning_text.done
+data: {"content_index":0,"item_id":"rs_msg_chain2_stream_0","output_index":0,"sequence_number":5,"text":"Need weather.","type":"response.reasoning_text.done"}
+
+event: response.content_part.done
+data: {"content_index":0,"item_id":"rs_msg_chain2_stream_0","output_index":0,"part":{"text":"Need weather.","type":"reasoning_text"},"sequence_number":6,"type":"response.content_part.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"text":"Need weather.","type":"reasoning_text"}],"encrypted_content":"eyJ2ZXJzaW9uIjoxLCJzb3VyY2UiOiJhbnRocm9waWMiLCJwYXlsb2FkIjpbMTIzLDM0LDExNSwxMDUsMTAzLDExMCw5NywxMTYsMTE3LDExNCwxMDEsMzQsNTgsMzQsMTE1LDEwNSwxMDMsOTUsMTE0LDEwMSw5NywxMDgsOTUsOTcsMTEwLDExNiwxMDQsMTE0LDExMSwxMTIsMTA1LDk5LDk1LDExNSwxMTYsMTE0LDEwMSw5NywxMDksMzQsNDQsMzQsMTE2LDEwNCwxMDUsMTEwLDEwNywxMDUsMTEwLDEwMywzNCw1OCwzNCw3OCwxMDEsMTAxLDEwMCwzMiwxMTksMTAxLDk3LDExNiwxMDQsMTAxLDExNCw0NiwzNCw0NCwzNCwxMTYsMTIxLDExMiwxMDEsMzQsNTgsMzQsMTE2LDEwNCwxMDUsMTEwLDEwNywxMDUsMTEwLDEwMywzNCwxMjVdLCJjaGVja3N1bSI6NDcwMTY5NDAxfQ==","id":"rs_msg_chain2_stream_0","status":"completed","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":7,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"toolu_weather_stream","id":"fc_msg_chain2_stream_1","name":"lookup_weather","status":"in_progress","type":"function_call"},"output_index":1,"sequence_number":8,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"city\"","item_id":"fc_msg_chain2_stream_1","output_index":1,"sequence_number":9,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":":\"Paris\"}","item_id":"fc_msg_chain2_stream_1","output_index":1,"sequence_number":10,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"city\":\"Paris\"}","item_id":"fc_msg_chain2_stream_1","name":"lookup_weather","output_index":1,"sequence_number":11,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"city\":\"Paris\"}","call_id":"toolu_weather_stream","id":"fc_msg_chain2_stream_1","name":"lookup_weather","status":"completed","type":"function_call"},"output_index":1,"sequence_number":12,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"created_at":0,"error":null,"id":"msg_chain2_stream","incomplete_details":null,"model":"claude-sonnet-4-5","object":"response","output":[{"content":[{"text":"Need weather.","type":"reasoning_text"}],"encrypted_content":"eyJ2ZXJzaW9uIjoxLCJzb3VyY2UiOiJhbnRocm9waWMiLCJwYXlsb2FkIjpbMTIzLDM0LDExNSwxMDUsMTAzLDExMCw5NywxMTYsMTE3LDExNCwxMDEsMzQsNTgsMzQsMTE1LDEwNSwxMDMsOTUsMTE0LDEwMSw5NywxMDgsOTUsOTcsMTEwLDExNiwxMDQsMTE0LDExMSwxMTIsMTA1LDk5LDk1LDExNSwxMTYsMTE0LDEwMSw5NywxMDksMzQsNDQsMzQsMTE2LDEwNCwxMDUsMTEwLDEwNywxMDUsMTEwLDEwMywzNCw1OCwzNCw3OCwxMDEsMTAxLDEwMCwzMiwxMTksMTAxLDk3LDExNiwxMDQsMTAxLDExNCw0NiwzNCw0NCwzNCwxMTYsMTIxLDExMiwxMDEsMzQsNTgsMzQsMTE2LDEwNCwxMDUsMTEwLDEwNywxMDUsMTEwLDEwMywzNCwxMjVdLCJjaGVja3N1bSI6NDcwMTY5NDAxfQ==","id":"rs_msg_chain2_stream_0","status":"completed","summary":[],"type":"reasoning"},{"arguments":"{\"city\":\"Paris\"}","call_id":"toolu_weather_stream","id":"fc_msg_chain2_stream_1","name":"lookup_weather","status":"completed","type":"function_call"}],"parallel_tool_calls":true,"previous_response_id":null,"status":"completed","store":false,"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":29}},"sequence_number":13,"type":"response.completed"}

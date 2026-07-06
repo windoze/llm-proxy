@@ -771,8 +771,14 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 新增单元/路由测试覆盖 retryable status 重试、`Retry-After`、非 retryable 400 不重试、per-attempt timeout、流式响应持有并发 permit、配置文件/env 覆盖，以及 `/v1/messages` Chat backend 路由重试装配。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`cargo test --all --all-targets` 均通过。
 
-### M7-07 `[TODO]` 端到端回归测试套件
+### [DONE] M7-07 端到端回归测试套件
 4 条链各录制若干真实会话（文本/reasoning/tool-use/多轮），做快照回归。整理成 `cargo test` 可跑的套件。
+
+完成记录：
+- 2026-07-06：已新增 `src/tests/e2e_regression.rs`，把 M7 端到端回归补成 `cargo test` 默认可跑的快照套件，覆盖链 1 的 DeepSeek reasoning SSE、链 4 的 Responses→Anthropic 文本 JSON、链 2 的 Anthropic→Responses 文本 JSON。
+- 已为既有富↔富链路测试补充 M7 快照：链 4 Responses→Anthropic reasoning/tool-use/multiturn 的首轮 JSON、二轮 JSON、SSE；链 2 Anthropic→Responses reasoning/tool-use/multiturn 的首轮 JSON、二轮 JSON、SSE。
+- 与既有链 1/链 3 plain text、reasoning、tool-use/multiturn SSE 快照合并后，4 条链的文本、reasoning、tool-use、多轮关键形状均由 committed `insta` snapshot 锁定，且不依赖真实网络或凭据。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets --quiet` 通过；变更后 `cargo fmt --all`、`INSTA_UPDATE=always cargo test --all --all-targets --quiet`、`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets --quiet` 均通过。
 
 ### M7-08 `[TODO]` README 与部署文档
 写 `README.md`：配置示例、如何把 Claude Code / Codex 指向本网关、支持的后端与 profile、已知限制。

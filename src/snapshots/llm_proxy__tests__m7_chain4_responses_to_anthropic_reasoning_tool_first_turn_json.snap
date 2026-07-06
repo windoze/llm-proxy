@@ -1,0 +1,31 @@
+---
+source: src/main.rs
+expression: "serde_json::to_string_pretty(&first_body).unwrap()"
+---
+{
+  "content": [
+    {
+      "signature": "llm_proxy_sig_v1:eyJ2ZXJzaW9uIjoxLCJzb3VyY2UiOiJyZXNwb25zZXMiLCJwYXlsb2FkIjpbMTAxLDExMCw5OSw0NSwxMTksMTAxLDk3LDExNiwxMDQsMTAxLDExNCw0NSw0OV0sImNoZWNrc3VtIjo0MDU4NDQ1ODc1fQ==",
+      "thinking": "Need the weather tool.",
+      "type": "thinking"
+    },
+    {
+      "id": "call_weather_1",
+      "input": {
+        "city": "Paris"
+      },
+      "name": "lookup_weather",
+      "type": "tool_use"
+    }
+  ],
+  "id": "resp_chain4_tool_1",
+  "model": "gpt-5.1",
+  "role": "assistant",
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": 32,
+    "output_tokens": 12
+  }
+}

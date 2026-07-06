@@ -1,0 +1,22 @@
+---
+source: src/main.rs
+expression: "serde_json::to_string_pretty(&second_body).unwrap()"
+---
+{
+  "content": [
+    {
+      "text": "No umbrella needed.",
+      "type": "text"
+    }
+  ],
+  "id": "resp_chain4_final",
+  "model": "gpt-5.1",
+  "role": "assistant",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": 48,
+    "output_tokens": 5
+  }
+}

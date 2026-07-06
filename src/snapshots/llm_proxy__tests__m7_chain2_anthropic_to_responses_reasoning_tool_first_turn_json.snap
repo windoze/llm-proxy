@@ -1,0 +1,49 @@
+---
+source: src/main.rs
+expression: "serde_json::to_string_pretty(&first_body).unwrap()"
+---
+{
+  "created_at": 0,
+  "error": null,
+  "id": "msg_chain2_tool_1",
+  "incomplete_details": null,
+  "model": "claude-sonnet-4-5",
+  "object": "response",
+  "output": [
+    {
+      "encrypted_content": "eyJ2ZXJzaW9uIjoxLCJzb3VyY2UiOiJhbnRocm9waWMiLCJwYXlsb2FkIjpbMTIzLDM0LDExNSwxMDUsMTAzLDExMCw5NywxMTYsMTE3LDExNCwxMDEsMzQsNTgsMzQsMTE1LDEwNSwxMDMsOTUsMTE0LDEwMSw5NywxMDgsOTUsOTcsMTEwLDExNiwxMDQsMTE0LDExMSwxMTIsMTA1LDk5LDk1LDQ5LDM0LDQ0LDM0LDExNiwxMDQsMTA1LDExMCwxMDcsMTA1LDExMCwxMDMsMzQsNTgsMzQsNzgsMTAxLDEwMSwxMDAsMzIsMTE2LDEwNCwxMDEsMzIsMTE5LDEwMSw5NywxMTYsMTA0LDEwMSwxMTQsMzIsMTE2LDExMSwxMTEsMTA4LDQ2LDM0LDQ0LDM0LDExNiwxMjEsMTEyLDEwMSwzNCw1OCwzNCwxMTYsMTA0LDEwNSwxMTAsMTA3LDEwNSwxMTAsMTAzLDM0LDEyNV0sImNoZWNrc3VtIjoxOTc4MDM5MTQ3fQ==",
+      "id": "rs_llm_proxy_v1_anthropic_75e67b6b",
+      "status": "completed",
+      "summary": [
+        {
+          "text": "Need the weather tool.",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
+      "arguments": "{\"city\":\"Paris\"}",
+      "call_id": "toolu_weather_1",
+      "id": "fc_msg_chain2_tool_1_1",
+      "name": "lookup_weather",
+      "status": "completed",
+      "type": "function_call"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "status": "completed",
+  "store": false,
+  "usage": {
+    "input_tokens": 32,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 12,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 44
+  }
+}

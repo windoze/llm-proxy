@@ -694,6 +694,8 @@ mod tests {
         matchers::{body_json, body_string, header as header_is, method, path},
     };
 
+    mod e2e_regression;
+
     fn test_app(passthrough_upstream_url: Option<String>) -> Router {
         app_with_state(AppState::from_config(config::Config {
             passthrough_upstream_url,
@@ -1472,6 +1474,10 @@ mod tests {
             })
         );
         assert_eq!(first_body["stop_reason"], json!("tool_use"));
+        insta::assert_snapshot!(
+            "m7_chain4_responses_to_anthropic_reasoning_tool_first_turn_json",
+            serde_json::to_string_pretty(&first_body).unwrap()
+        );
 
         let second_response = post_messages(
             test_app_with_responses_backend(
@@ -1551,6 +1557,10 @@ mod tests {
                 "type": "text",
                 "text": "No umbrella needed."
             }])
+        );
+        insta::assert_snapshot!(
+            "m7_chain4_responses_to_anthropic_reasoning_tool_second_turn_json",
+            serde_json::to_string_pretty(&second_body).unwrap()
         );
     }
 
@@ -1785,6 +1795,7 @@ mod tests {
         let source_block = crate::reasoning::envelope::unwrap_from_signature(&signature).unwrap();
         assert_eq!(source_block.source, ir::message::Provider::Responses);
         assert_eq!(source_block.payload, b"enc-stream-weather");
+        insta::assert_snapshot!("m7_chain4_responses_to_anthropic_reasoning_tool_sse", body);
     }
 
     #[tokio::test]
@@ -2131,6 +2142,10 @@ mod tests {
                 "arguments": "{\"city\":\"Paris\"}"
             })
         );
+        insta::assert_snapshot!(
+            "m7_chain2_anthropic_to_responses_reasoning_tool_first_turn_json",
+            serde_json::to_string_pretty(&first_body).unwrap()
+        );
 
         let second_response = post_responses(
             test_app_with_anthropic_backend(
@@ -2206,6 +2221,10 @@ mod tests {
                     "annotations": []
                 }]
             }])
+        );
+        insta::assert_snapshot!(
+            "m7_chain2_anthropic_to_responses_reasoning_tool_second_turn_json",
+            serde_json::to_string_pretty(&second_body).unwrap()
         );
     }
 
@@ -2434,6 +2453,10 @@ mod tests {
                 "thinking": "Need weather.",
                 "signature": "sig_real_anthropic_stream"
             })
+        );
+        insta::assert_snapshot!(
+            "m7_chain2_anthropic_to_responses_reasoning_tool_sse",
+            normalize_created_at_fields(body)
         );
     }
 
