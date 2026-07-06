@@ -97,6 +97,25 @@ backend = "anthropic"
 model = "claude-opus-compatible"
 ```
 
+### Backend failover
+
+A model alias can list several backend targets. Index 0 is preferred; the rest are failover candidates. When the active backend accumulates enough failures (HTTP 429, 5xx, or connection/timeout errors) within a sliding window, the alias advances to the next target for **subsequent** requests. Switching is one-way (it never falls back to a preferred target) and is rate-limited by a minimum switch interval — even if the failure threshold is met, no switch happens until that interval has elapsed since the last switch. The request that trips the threshold still returns its error; only later requests use the new target.
+
+```toml
+[model_aliases."codex-default"]
+targets = [
+  { backend = "responses", model = "gpt-5.1" },
+  { backend = "anthropic", model = "claude-sonnet-4-5" },
+]
+
+[model_aliases."codex-default".failover]
+window_ms = 60000              # count failures over this sliding window
+failure_threshold = 3          # failures within the window that satisfy the switch condition
+min_switch_interval_ms = 30000 # minimum time between two consecutive switches
+```
+
+The `failover` block is optional; when omitted it defaults to `window_ms = 60000`, `failure_threshold = 3`, `min_switch_interval_ms = 30000`. The legacy single-target form (`backend = "..."` + `model = "..."`) remains supported and is equivalent to a one-entry `targets` list with no failover.
+
 Do not commit real credentials. Keep secrets in local environment variables or an untracked local config. For the example above:
 
 ```bash

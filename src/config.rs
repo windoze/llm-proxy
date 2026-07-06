@@ -362,29 +362,135 @@ pub enum ProfileKind {
     Anthropic,
 }
 
-/// Client-facing model alias to backend target mapping.
+/// A single backend target for a model alias, pairing a backend with its upstream model name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct ModelAlias {
+pub struct AliasTarget {
     pub backend: String,
     #[serde(alias = "rename", alias = "upstream_model")]
     pub model: String,
 }
 
+/// Failover policy controlling when an alias switches from one target to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FailoverPolicy {
+    /// Sliding window over which failures are counted, in milliseconds.
+    pub window_ms: u64,
+    /// Number of failures within the window that satisfies the switch condition.
+    pub failure_threshold: u32,
+    /// Minimum interval between two consecutive switches, in milliseconds.
+    pub min_switch_interval_ms: u64,
+}
+
+impl Default for FailoverPolicy {
+    fn default() -> Self {
+        Self {
+            window_ms: 60_000,
+            failure_threshold: 3,
+            min_switch_interval_ms: 30_000,
+        }
+    }
+}
+
+impl FailoverPolicy {
+    fn validate(&self, alias: &str) -> Result<()> {
+        if self.window_ms == 0 {
+            return Err(config_error(format!(
+                "model_aliases.{alias}.failover.window_ms must be greater than zero"
+            )));
+        }
+        if self.failure_threshold == 0 {
+            return Err(config_error(format!(
+                "model_aliases.{alias}.failover.failure_threshold must be greater than zero"
+            )));
+        }
+        if self.min_switch_interval_ms == 0 {
+            return Err(config_error(format!(
+                "model_aliases.{alias}.failover.min_switch_interval_ms must be greater than zero"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Client-facing model alias resolving to one or more backend targets with optional failover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ModelAlias {
+    /// Legacy single-target backend name; folded into `targets` during validation.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub backend: String,
+    /// Legacy single-target upstream model name; folded into `targets` during validation.
+    #[serde(alias = "rename", alias = "upstream_model", skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Ordered backend targets: index 0 is preferred, the rest are failover candidates.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<AliasTarget>,
+    /// Failover policy; only meaningful when `targets` has more than one entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failover: Option<FailoverPolicy>,
+}
+
 impl ModelAlias {
+    /// Returns the ordered backend targets for this alias (always non-empty after validation).
+    pub fn targets(&self) -> &[AliasTarget] {
+        &self.targets
+    }
+
+    /// Returns the effective failover policy, defaulting when unset but multiple targets exist.
+    pub fn failover_policy(&self) -> FailoverPolicy {
+        self.failover.unwrap_or_default()
+    }
+
     fn validate(
         &mut self,
         alias: &str,
         backend_names: &std::collections::BTreeSet<String>,
     ) -> Result<()> {
-        self.backend = required_trimmed(format!("model_aliases.{alias}.backend"), &self.backend)?;
-        self.model = required_trimmed(format!("model_aliases.{alias}.model"), &self.model)?;
-        if !backend_names.contains(&self.backend) {
+        let has_legacy = !self.backend.trim().is_empty() || !self.model.trim().is_empty();
+        if has_legacy && !self.targets.is_empty() {
             return Err(config_error(format!(
-                "model alias `{alias}` references unknown backend `{}`",
-                self.backend
+                "model alias `{alias}` must set either `backend`/`model` or `targets`, not both"
             )));
         }
+
+        if has_legacy {
+            let backend =
+                required_trimmed(format!("model_aliases.{alias}.backend"), &self.backend)?;
+            let model = required_trimmed(format!("model_aliases.{alias}.model"), &self.model)?;
+            self.targets = vec![AliasTarget { backend, model }];
+            self.backend = String::new();
+            self.model = String::new();
+        }
+
+        if self.targets.is_empty() {
+            return Err(config_error(format!(
+                "model alias `{alias}` requires `backend`/`model` or a non-empty `targets` list"
+            )));
+        }
+
+        for (index, target) in self.targets.iter_mut().enumerate() {
+            target.backend = required_trimmed(
+                format!("model_aliases.{alias}.targets[{index}].backend"),
+                &target.backend,
+            )?;
+            target.model = required_trimmed(
+                format!("model_aliases.{alias}.targets[{index}].model"),
+                &target.model,
+            )?;
+            if !backend_names.contains(&target.backend) {
+                return Err(config_error(format!(
+                    "model alias `{alias}` references unknown backend `{}`",
+                    target.backend
+                )));
+            }
+        }
+
+        if let Some(policy) = self.failover.as_ref() {
+            policy.validate(alias)?;
+        }
+
         Ok(())
     }
 }
@@ -893,7 +999,7 @@ model = "gpt-5.1"
             Some("https://responses.example/v1/responses".to_owned())
         );
         assert_eq!(
-            config.model_aliases["codex-default"].model,
+            config.model_aliases["codex-default"].targets()[0].model,
             "gpt-5.1".to_owned()
         );
     }
@@ -998,7 +1104,10 @@ listen_addr = "127.0.0.1:17777"
             Some("https://anthropic-env.example")
         );
         assert_eq!(anthropic.default_model.as_deref(), Some("claude-env"));
-        assert_eq!(config.model_aliases["sonnet"].backend, "anthropic");
+        assert_eq!(
+            config.model_aliases["sonnet"].targets()[0].backend,
+            "anthropic"
+        );
     }
 
     #[test]
@@ -1109,5 +1218,203 @@ concurrency_limit = 0
             err.to_string()
                 .contains("concurrency_limit must be greater than zero")
         );
+    }
+
+    #[test]
+    fn alias_with_targets_list_parses_failover_policy() {
+        let config = Config::from_toml_str(
+            r#"
+[[backends]]
+name = "responses"
+type = "responses"
+endpoint = "https://responses.example/v1/responses"
+api_key = "responses-key"
+profile = "generic_open_ai"
+
+[[backends]]
+name = "anthropic"
+type = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "anthropic-key"
+profile = "anthropic"
+
+[model_aliases."codex-default"]
+targets = [
+  { backend = "responses", model = "gpt-5.1" },
+  { backend = "anthropic", model = "claude-sonnet-4-5" },
+]
+
+[model_aliases."codex-default".failover]
+window_ms = 45000
+failure_threshold = 4
+min_switch_interval_ms = 15000
+"#,
+        )
+        .unwrap();
+
+        let alias = &config.model_aliases["codex-default"];
+        assert_eq!(alias.targets().len(), 2);
+        assert_eq!(alias.targets()[0].backend, "responses");
+        assert_eq!(alias.targets()[0].model, "gpt-5.1");
+        assert_eq!(alias.targets()[1].backend, "anthropic");
+        assert_eq!(alias.targets()[1].model, "claude-sonnet-4-5");
+        let policy = alias.failover_policy();
+        assert_eq!(policy.window_ms, 45_000);
+        assert_eq!(policy.failure_threshold, 4);
+        assert_eq!(policy.min_switch_interval_ms, 15_000);
+    }
+
+    #[test]
+    fn alias_targets_default_failover_policy_when_omitted() {
+        let config = Config::from_toml_str(
+            r#"
+[[backends]]
+name = "responses"
+type = "responses"
+endpoint = "https://responses.example/v1/responses"
+api_key = "responses-key"
+profile = "generic_open_ai"
+
+[[backends]]
+name = "anthropic"
+type = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "anthropic-key"
+profile = "anthropic"
+
+[model_aliases."codex-default"]
+targets = [
+  { backend = "responses", model = "gpt-5.1" },
+  { backend = "anthropic", model = "claude-sonnet-4-5" },
+]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.model_aliases["codex-default"].failover_policy(),
+            FailoverPolicy::default()
+        );
+    }
+
+    #[test]
+    fn legacy_alias_backend_model_folds_into_single_target() {
+        let config = Config::from_toml_str(
+            r#"
+[[backends]]
+name = "deepseek"
+type = "chat"
+base_url = "https://api.deepseek.com"
+profile = "deep_seek"
+
+[model_aliases."claude-code-default"]
+backend = "deepseek"
+model = "deepseek-chat"
+"#,
+        )
+        .unwrap();
+
+        let alias = &config.model_aliases["claude-code-default"];
+        assert_eq!(alias.targets().len(), 1);
+        assert_eq!(alias.targets()[0].backend, "deepseek");
+        assert_eq!(alias.targets()[0].model, "deepseek-chat");
+        assert!(alias.backend.is_empty());
+        assert!(alias.model.is_empty());
+    }
+
+    #[test]
+    fn alias_rejects_both_legacy_and_targets() {
+        let err = Config::from_toml_str(
+            r#"
+[[backends]]
+name = "deepseek"
+type = "chat"
+base_url = "https://api.deepseek.com"
+profile = "deep_seek"
+
+[model_aliases."mixed"]
+backend = "deepseek"
+model = "deepseek-chat"
+targets = [{ backend = "deepseek", model = "deepseek-chat" }]
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("must set either `backend`/`model` or `targets`, not both")
+        );
+    }
+
+    #[test]
+    fn alias_rejects_target_to_unknown_backend() {
+        let err = Config::from_toml_str(
+            r#"
+[model_aliases."missing"]
+targets = [{ backend = "nope", model = "gpt-test" }]
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("model alias `missing` references unknown backend `nope`")
+        );
+    }
+
+    #[test]
+    fn alias_rejects_invalid_failover_policy() {
+        let err = Config::from_toml_str(
+            r#"
+[[backends]]
+name = "responses"
+type = "responses"
+endpoint = "https://responses.example/v1/responses"
+api_key = "responses-key"
+profile = "generic_open_ai"
+
+[[backends]]
+name = "anthropic"
+type = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "anthropic-key"
+profile = "anthropic"
+
+[model_aliases."codex-default"]
+targets = [
+  { backend = "responses", model = "gpt-5.1" },
+  { backend = "anthropic", model = "claude-sonnet-4-5" },
+]
+
+[model_aliases."codex-default".failover]
+window_ms = 0
+failure_threshold = 3
+min_switch_interval_ms = 15000
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("window_ms must be greater than zero"));
+    }
+
+    #[test]
+    fn env_model_aliases_still_accept_legacy_json() {
+        let env = [
+            (
+                BACKENDS_ENV,
+                r#"[{"name":"anthropic","type":"anthropic","base_url":"https://anthropic.example","api_key":"k","profile":"anthropic"}]"#,
+            ),
+            (
+                MODEL_ALIASES_ENV,
+                r#"{"sonnet":{"backend":"anthropic","model":"claude-env"}}"#,
+            ),
+        ];
+
+        let config = Config::load_with_env(env).unwrap();
+
+        let alias = &config.model_aliases["sonnet"];
+        assert_eq!(alias.targets().len(), 1);
+        assert_eq!(alias.targets()[0].backend, "anthropic");
+        assert_eq!(alias.targets()[0].model, "claude-env");
     }
 }

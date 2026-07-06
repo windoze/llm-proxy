@@ -1,0 +1,60 @@
+# 示例：为一个模型别名配置多后端故障切换（failover）
+#
+# 当首选后端在滑动窗口内累计足够多的失败（429 / 5xx / 连接超时）时，
+# 该别名会为后续请求切换到下一个后端。切换是单向的，且受最小切换间隔限制。
+#
+# 用法：
+#   export LLM_PROXY_CONFIG="$PWD/example/failover-two-backends.toml"
+#   export OPENAI_API_KEY="<Responses 后端 key>"
+#   export ANTHROPIC_AUTH_TOKEN="<Anthropic 后端 key>"
+#   cargo run
+#
+#   # 另一个 shell 里指向代理：
+#   export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+#   export ANTHROPIC_AUTH_TOKEN="local-placeholder"
+#   claude -p "Use one sentence to say hello through llm-proxy."
+
+listen_addr = "127.0.0.1:8080"
+anthropic_default_max_tokens = 4096
+
+[switches]
+anthropic_cache_injection = true
+observability_dump = false
+
+[backend_request]
+# 注意：max_retries 是「同一后端内」的重试；failover 是「跨后端」切换，二者独立。
+max_retries = 2
+initial_backoff_ms = 250
+max_backoff_ms = 5000
+timeout_ms = 120000
+concurrency_limit = 16
+
+# 首选后端：OpenAI Responses 兼容。
+[[backends]]
+name = "responses"
+type = "responses"
+endpoint = "https://api.openai.com/v1/responses"
+api_key = "REPLACE_WITH_RESPONSES_API_KEY"
+profile = "generic_openai"
+
+# 故障切换后端：Anthropic Messages 兼容。
+[[backends]]
+name = "anthropic"
+type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "REPLACE_WITH_ANTHROPIC_API_KEY"
+profile = "anthropic"
+anthropic_version = "2023-06-01"
+
+# 多目标别名：下标 0（responses）为首选，anthropic 为故障切换候选。
+# 每个目标各自指定上游模型名，支持异构后端切换。
+[model_aliases."claude-sonnet-4-5"]
+targets = [
+  { backend = "responses", model = "gpt-5.1" },
+  { backend = "anthropic", model = "claude-sonnet-4-5" },
+]
+
+[model_aliases."claude-sonnet-4-5".failover]
+window_ms = 60000              # 统计失败的滑动窗口
+failure_threshold = 3          # 窗口内达到该失败次数即满足切换条件
+min_switch_interval_ms = 30000 # 两次切换之间的最小间隔

@@ -216,14 +216,16 @@ impl BackendResponse {
     }
 }
 
-fn is_retryable_status(status: StatusCode) -> bool {
+/// Reports whether an upstream HTTP status should be retried (and counts toward failover).
+pub(crate) fn is_retryable_status(status: StatusCode) -> bool {
     status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_MANY_REQUESTS
         || status == StatusCode::TOO_EARLY
         || status.is_server_error()
 }
 
-fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
+/// Reports whether a transport error is transient (and counts toward failover).
+pub(crate) fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect()
 }
 
