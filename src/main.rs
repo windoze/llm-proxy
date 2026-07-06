@@ -34,6 +34,7 @@ use crate::{
     provider::{
         anthropic_backend::AnthropicBackendClient,
         anthropic_cache::AnthropicCacheControlInjection,
+        backend_request::{BackendRequestControls, BackendResponse},
         responses_backend::ResponsesBackendClient,
         router::{FrontendEndpoint, ModelRouter},
     },
@@ -69,6 +70,7 @@ struct AppState {
     anthropic_default_max_tokens: Option<u32>,
     anthropic_cache_control: AnthropicCacheControlInjection,
     observability_dump: bool,
+    backend_request_controls: BackendRequestControls,
 }
 
 impl AppState {
@@ -81,6 +83,7 @@ impl AppState {
         let passthrough_upstream_url = config.passthrough_upstream_url.clone();
         let anthropic_default_max_tokens = config.anthropic_default_max_tokens;
         let observability_dump = config.switches.observability_dump;
+        let backend_request_controls = BackendRequestControls::from_config(&config.backend_request);
 
         Self {
             http_client: reqwest::Client::new(),
@@ -89,6 +92,7 @@ impl AppState {
             anthropic_default_max_tokens,
             anthropic_cache_control,
             observability_dump,
+            backend_request_controls,
         }
     }
 }
@@ -333,19 +337,20 @@ async fn send_chat_request(
     backend: &config::BackendConfig,
     body: Value,
     observation: &RequestObservation,
-) -> error::Result<reqwest::Response> {
+) -> error::Result<BackendResponse> {
     observation.dump_json("upstream_request", &body);
     let upstream_url = parse_chat_completions_url(backend)?;
     let bearer_token = upstream_bearer_token(backend, headers)?;
-    let upstream_response = state
-        .http_client
-        .post(upstream_url)
-        .bearer_auth(bearer_token)
-        .json(&body)
-        .send()
-        .await?;
-
-    ensure_upstream_success(upstream_response).await
+    state
+        .backend_request_controls
+        .send(|| {
+            state
+                .http_client
+                .post(upstream_url.clone())
+                .bearer_auth(bearer_token)
+                .json(&body)
+        })
+        .await
 }
 
 async fn send_responses_request(
@@ -353,7 +358,7 @@ async fn send_responses_request(
     backend: &config::BackendConfig,
     body: Value,
     observation: &RequestObservation,
-) -> error::Result<reqwest::Response> {
+) -> error::Result<BackendResponse> {
     let prepared_body = provider::responses_backend::prepare_responses_request_body(body.clone())?;
     observation.dump_json("upstream_request", &prepared_body);
     responses_backend_client(state, backend)?.send(body).await
@@ -365,7 +370,7 @@ async fn send_anthropic_request(
     backend: &config::BackendConfig,
     body: Value,
     observation: &RequestObservation,
-) -> error::Result<reqwest::Response> {
+) -> error::Result<BackendResponse> {
     let prepared_body =
         provider::anthropic_cache::prepare_anthropic_request_body_with_cache_control(
             body.clone(),
@@ -376,7 +381,7 @@ async fn send_anthropic_request(
 }
 
 async fn chat_json_to_anthropic_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: &RequestObservation,
 ) -> error::Result<Response> {
     let chat_response = upstream_response.json::<Value>().await?;
@@ -389,7 +394,7 @@ async fn chat_json_to_anthropic_response(
 }
 
 async fn responses_json_to_anthropic_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: &RequestObservation,
 ) -> error::Result<Response> {
     let responses_response = upstream_response.json::<Value>().await?;
@@ -402,7 +407,7 @@ async fn responses_json_to_anthropic_response(
 }
 
 async fn chat_json_to_responses_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: &RequestObservation,
 ) -> error::Result<Response> {
     let chat_response = upstream_response.json::<Value>().await?;
@@ -416,7 +421,7 @@ async fn chat_json_to_responses_response(
 
 /// Converts a non-streaming Anthropic backend response into a Responses JSON response.
 async fn anthropic_json_to_responses_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: &RequestObservation,
 ) -> error::Result<Response> {
     let anthropic_response = upstream_response.json::<Value>().await?;
@@ -429,7 +434,7 @@ async fn anthropic_json_to_responses_response(
 }
 
 async fn chat_stream_to_anthropic_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: RequestObservation,
 ) -> error::Result<Response> {
     let chat_sse = parse_openai_chat_sse(upstream_response.bytes_stream());
@@ -448,7 +453,7 @@ async fn chat_stream_to_anthropic_response(
 }
 
 async fn responses_stream_to_anthropic_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: RequestObservation,
 ) -> error::Result<Response> {
     let responses_sse = parse_reqwest_sse(upstream_response.bytes_stream());
@@ -467,7 +472,7 @@ async fn responses_stream_to_anthropic_response(
 }
 
 async fn chat_stream_to_responses_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: RequestObservation,
 ) -> error::Result<Response> {
     let chat_sse = parse_openai_chat_sse(upstream_response.bytes_stream());
@@ -487,7 +492,7 @@ async fn chat_stream_to_responses_response(
 
 /// Converts Anthropic backend SSE into Responses SSE through streaming IR events.
 async fn anthropic_stream_to_responses_response(
-    upstream_response: reqwest::Response,
+    upstream_response: BackendResponse,
     observation: RequestObservation,
 ) -> error::Result<Response> {
     let anthropic_sse = parse_reqwest_sse(upstream_response.bytes_stream());
@@ -503,19 +508,6 @@ async fn anthropic_stream_to_responses_response(
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     Ok(response)
-}
-
-async fn ensure_upstream_success(
-    upstream_response: reqwest::Response,
-) -> error::Result<reqwest::Response> {
-    let status = upstream_response.status();
-    if status.is_success() {
-        return Ok(upstream_response);
-    }
-
-    let headers = upstream_response.headers().clone();
-    let body = upstream_response.text().await?;
-    Err(error::ProxyError::upstream_status(status, &headers, body))
 }
 
 fn apply_anthropic_defaults(
@@ -553,7 +545,10 @@ fn responses_backend_client(
         ))
     })?;
 
-    ResponsesBackendClient::with_http_client(state.http_client.clone(), endpoint, api_key)
+    Ok(
+        ResponsesBackendClient::with_http_client(state.http_client.clone(), endpoint, api_key)?
+            .with_request_controls(state.backend_request_controls.clone()),
+    )
 }
 
 /// Builds the configured Anthropic Messages backend client used by chain 2.
@@ -579,7 +574,8 @@ fn anthropic_backend_client(
         api_key,
         anthropic_version,
     )?
-    .with_cache_control_injection(state.anthropic_cache_control))
+    .with_cache_control_injection(state.anthropic_cache_control)
+    .with_request_controls(state.backend_request_controls.clone()))
 }
 
 /// Converts an Anthropic base URL into the concrete Messages API endpoint.
@@ -710,8 +706,23 @@ mod tests {
         chat_api_key: Option<&str>,
         anthropic_default_max_tokens: Option<u32>,
     ) -> Router {
+        test_app_with_chat_backend_and_request_controls(
+            chat_completions_url,
+            chat_api_key,
+            anthropic_default_max_tokens,
+            config::BackendRequestConfig::default(),
+        )
+    }
+
+    fn test_app_with_chat_backend_and_request_controls(
+        chat_completions_url: String,
+        chat_api_key: Option<&str>,
+        anthropic_default_max_tokens: Option<u32>,
+        backend_request: config::BackendRequestConfig,
+    ) -> Router {
         app_with_state(AppState::from_config(config::Config {
             anthropic_default_max_tokens,
+            backend_request,
             backends: vec![config::BackendConfig {
                 name: "deepseek".to_owned(),
                 kind: Some(config::BackendKind::Chat),
@@ -3133,6 +3144,67 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn messages_route_retries_retryable_chat_backend_status() {
+        let upstream = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("overloaded"))
+            .up_to_n_times(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl_retry",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "retry succeeded"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let response = post_messages(
+            test_app_with_chat_backend_and_request_controls(
+                format!("{}/chat/completions", upstream.uri()),
+                Some("backend-secret"),
+                None,
+                config::BackendRequestConfig {
+                    max_retries: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                    timeout_ms: None,
+                    concurrency_limit: None,
+                },
+            ),
+            json!({
+                "model": "deepseek-chat",
+                "messages": [{ "role": "user", "content": "hello" }]
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["content"][0]["text"], "retry succeeded");
+
+        let requests = upstream.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
     }
 
     #[tokio::test]

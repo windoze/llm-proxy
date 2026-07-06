@@ -861,6 +861,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "futures-util",
+ "httpdate",
  "insta",
  "reqwest",
  "serde",

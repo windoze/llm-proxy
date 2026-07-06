@@ -10,6 +10,7 @@ use crate::{
     provider::anthropic_cache::{
         AnthropicCacheControlInjection, prepare_anthropic_request_body_with_cache_control,
     },
+    provider::backend_request::{BackendRequestControls, BackendResponse},
 };
 
 const X_API_KEY_HEADER: &str = "x-api-key";
@@ -24,6 +25,7 @@ pub struct AnthropicBackendClient {
     auth: AnthropicBackendAuth,
     anthropic_version: String,
     cache_control: AnthropicCacheControlInjection,
+    request_controls: BackendRequestControls,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +104,7 @@ impl AnthropicBackendClient {
             auth,
             anthropic_version: anthropic_version.to_owned(),
             cache_control: AnthropicCacheControlInjection::Disabled,
+            request_controls: BackendRequestControls::default(),
         })
     }
 
@@ -114,16 +117,24 @@ impl AnthropicBackendClient {
         self
     }
 
-    /// Sends an Anthropic request and leaves the response body available as `bytes_stream()`.
-    pub async fn send(&self, body: Value) -> Result<reqwest::Response> {
-        let body = prepare_anthropic_request_body_with_cache_control(body, self.cache_control)?;
-        let request = self
-            .http_client
-            .post(self.endpoint.clone())
-            .header(ANTHROPIC_VERSION_HEADER, &self.anthropic_version);
-        let response = self.auth.apply(request).json(&body).send().await?;
+    /// Applies shared backend retry, timeout, and concurrency controls.
+    pub fn with_request_controls(mut self, request_controls: BackendRequestControls) -> Self {
+        self.request_controls = request_controls;
+        self
+    }
 
-        ensure_upstream_success(response).await
+    /// Sends an Anthropic request and leaves the response body available as `bytes_stream()`.
+    pub async fn send(&self, body: Value) -> Result<BackendResponse> {
+        let body = prepare_anthropic_request_body_with_cache_control(body, self.cache_control)?;
+        self.request_controls
+            .send(|| {
+                let request = self
+                    .http_client
+                    .post(self.endpoint.clone())
+                    .header(ANTHROPIC_VERSION_HEADER, &self.anthropic_version);
+                self.auth.apply(request).json(&body)
+            })
+            .await
     }
 
     /// Returns the configured Anthropic Messages API endpoint.
@@ -135,17 +146,6 @@ impl AnthropicBackendClient {
     pub fn anthropic_version(&self) -> &str {
         &self.anthropic_version
     }
-}
-
-async fn ensure_upstream_success(response: reqwest::Response) -> Result<reqwest::Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-
-    let headers = response.headers().clone();
-    let body = response.text().await?;
-    Err(ProxyError::upstream_status(status, &headers, body))
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use crate::ir::message::EchoPolicy;
 
 pub mod anthropic_backend;
 pub mod anthropic_cache;
+pub mod backend_request;
 pub mod deepseek;
 pub mod responses_backend;
 pub mod router;

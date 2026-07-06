@@ -5,7 +5,10 @@
 
 use serde_json::Value;
 
-use crate::error::{ProxyError, Result};
+use crate::{
+    error::{ProxyError, Result},
+    provider::backend_request::{BackendRequestControls, BackendResponse},
+};
 
 const REQUIRED_REASONING_INCLUDE: &str = "reasoning.encrypted_content";
 
@@ -15,6 +18,7 @@ pub struct ResponsesBackendClient {
     http_client: reqwest::Client,
     endpoint: reqwest::Url,
     api_key: String,
+    request_controls: BackendRequestControls,
 }
 
 impl ResponsesBackendClient {
@@ -46,21 +50,27 @@ impl ResponsesBackendClient {
             http_client,
             endpoint,
             api_key: api_key.to_owned(),
+            request_controls: BackendRequestControls::default(),
         })
     }
 
-    /// Sends a Responses request and leaves the response body available as `bytes_stream()`.
-    pub async fn send(&self, body: Value) -> Result<reqwest::Response> {
-        let body = prepare_responses_request_body(body)?;
-        let response = self
-            .http_client
-            .post(self.endpoint.clone())
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?;
+    /// Applies shared backend retry, timeout, and concurrency controls.
+    pub fn with_request_controls(mut self, request_controls: BackendRequestControls) -> Self {
+        self.request_controls = request_controls;
+        self
+    }
 
-        ensure_upstream_success(response).await
+    /// Sends a Responses request and leaves the response body available as `bytes_stream()`.
+    pub async fn send(&self, body: Value) -> Result<BackendResponse> {
+        let body = prepare_responses_request_body(body)?;
+        self.request_controls
+            .send(|| {
+                self.http_client
+                    .post(self.endpoint.clone())
+                    .bearer_auth(&self.api_key)
+                    .json(&body)
+            })
+            .await
     }
 
     /// Returns the configured Responses API endpoint.
@@ -113,17 +123,6 @@ fn ensure_reasoning_include(object: &mut serde_json::Map<String, Value>) -> Resu
     object.insert("include".to_owned(), Value::Array(normalized));
 
     Ok(())
-}
-
-async fn ensure_upstream_success(response: reqwest::Response) -> Result<reqwest::Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-
-    let headers = response.headers().clone();
-    let body = response.text().await?;
-    Err(ProxyError::upstream_status(status, &headers, body))
 }
 
 fn mapping_error(message: impl Into<String>) -> ProxyError {

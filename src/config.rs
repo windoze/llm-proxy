@@ -24,6 +24,16 @@ pub const CACHE_INJECTION_ENV: &str = "LLM_PROXY_ANTHROPIC_CACHE_INJECTION";
 pub const REASONING_STORE_ENV: &str = "LLM_PROXY_REASONING_STORE";
 /// Environment variable enabling redacted request/response body dumps in debug logs.
 pub const OBSERVABILITY_DUMP_ENV: &str = "LLM_PROXY_OBSERVABILITY_DUMP";
+/// Environment variable overriding backend retry count.
+pub const BACKEND_MAX_RETRIES_ENV: &str = "LLM_PROXY_BACKEND_MAX_RETRIES";
+/// Environment variable overriding the first backend retry delay in milliseconds.
+pub const BACKEND_INITIAL_BACKOFF_MS_ENV: &str = "LLM_PROXY_BACKEND_INITIAL_BACKOFF_MS";
+/// Environment variable overriding the maximum backend retry delay in milliseconds.
+pub const BACKEND_MAX_BACKOFF_MS_ENV: &str = "LLM_PROXY_BACKEND_MAX_BACKOFF_MS";
+/// Environment variable overriding the per-attempt backend request timeout in milliseconds.
+pub const BACKEND_TIMEOUT_MS_ENV: &str = "LLM_PROXY_BACKEND_TIMEOUT_MS";
+/// Environment variable overriding the maximum number of simultaneous backend requests.
+pub const BACKEND_CONCURRENCY_LIMIT_ENV: &str = "LLM_PROXY_BACKEND_CONCURRENCY_LIMIT";
 /// Environment variable overriding the Chat Completions endpoint.
 pub const CHAT_COMPLETIONS_URL_ENV: &str = "LLM_PROXY_CHAT_COMPLETIONS_URL";
 /// Environment variable with the DeepSeek/OpenAI-compatible Chat API key.
@@ -64,6 +74,8 @@ pub struct Config {
     pub model_aliases: BTreeMap<String, ModelAlias>,
     #[serde(alias = "features")]
     pub switches: SwitchConfig,
+    #[serde(alias = "upstream_request")]
+    pub backend_request: BackendRequestConfig,
     #[serde(alias = "route_overrides")]
     pub routing: RoutingConfig,
 }
@@ -77,6 +89,7 @@ impl Default for Config {
             backends: Vec::new(),
             model_aliases: BTreeMap::new(),
             switches: SwitchConfig::default(),
+            backend_request: BackendRequestConfig::default(),
             routing: RoutingConfig::default(),
         }
     }
@@ -162,6 +175,7 @@ impl Config {
                 "anthropic_default_max_tokens must be greater than zero",
             ));
         }
+        self.backend_request.validate()?;
 
         let mut backend_names = std::collections::BTreeSet::new();
         for backend in &mut self.backends {
@@ -394,6 +408,60 @@ impl Default for SwitchConfig {
     }
 }
 
+/// Runtime controls applied to outbound backend HTTP requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackendRequestConfig {
+    pub max_retries: u32,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+    pub timeout_ms: Option<u64>,
+    pub concurrency_limit: Option<usize>,
+}
+
+impl Default for BackendRequestConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 0,
+            initial_backoff_ms: 250,
+            max_backoff_ms: 5_000,
+            timeout_ms: None,
+            concurrency_limit: None,
+        }
+    }
+}
+
+impl BackendRequestConfig {
+    fn validate(&self) -> Result<()> {
+        if self.initial_backoff_ms == 0 {
+            return Err(config_error(
+                "backend_request.initial_backoff_ms must be greater than zero",
+            ));
+        }
+        if self.max_backoff_ms == 0 {
+            return Err(config_error(
+                "backend_request.max_backoff_ms must be greater than zero",
+            ));
+        }
+        if self.max_backoff_ms < self.initial_backoff_ms {
+            return Err(config_error(
+                "backend_request.max_backoff_ms must be greater than or equal to initial_backoff_ms",
+            ));
+        }
+        if self.timeout_ms == Some(0) {
+            return Err(config_error(
+                "backend_request.timeout_ms must be greater than zero when set",
+            ));
+        }
+        if self.concurrency_limit == Some(0) {
+            return Err(config_error(
+                "backend_request.concurrency_limit must be greater than zero when set",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Legacy route-level overrides used when no exact model alias matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -453,6 +521,27 @@ fn apply_env_overrides(config: &mut Config, env: &BTreeMap<String, String>) -> R
     if let Some(observability_dump) = env_value(env, OBSERVABILITY_DUMP_ENV) {
         config.switches.observability_dump =
             parse_bool_env(OBSERVABILITY_DUMP_ENV, &observability_dump)?;
+    }
+    if let Some(max_retries) = env_value(env, BACKEND_MAX_RETRIES_ENV) {
+        config.backend_request.max_retries = parse_u32_env(BACKEND_MAX_RETRIES_ENV, &max_retries)?;
+    }
+    if let Some(initial_backoff_ms) = env_value(env, BACKEND_INITIAL_BACKOFF_MS_ENV) {
+        config.backend_request.initial_backoff_ms =
+            parse_u64_env(BACKEND_INITIAL_BACKOFF_MS_ENV, &initial_backoff_ms)?;
+    }
+    if let Some(max_backoff_ms) = env_value(env, BACKEND_MAX_BACKOFF_MS_ENV) {
+        config.backend_request.max_backoff_ms =
+            parse_u64_env(BACKEND_MAX_BACKOFF_MS_ENV, &max_backoff_ms)?;
+    }
+    if let Some(timeout_ms) = env_value(env, BACKEND_TIMEOUT_MS_ENV) {
+        config.backend_request.timeout_ms =
+            Some(parse_u64_env(BACKEND_TIMEOUT_MS_ENV, &timeout_ms)?);
+    }
+    if let Some(concurrency_limit) = env_value(env, BACKEND_CONCURRENCY_LIMIT_ENV) {
+        config.backend_request.concurrency_limit = Some(parse_usize_env(
+            BACKEND_CONCURRENCY_LIMIT_ENV,
+            &concurrency_limit,
+        )?);
     }
     if let Some(backend) = env_value(env, ANTHROPIC_MESSAGES_BACKEND_ENV) {
         config.routing.anthropic_messages_backend = Some(backend);
@@ -615,6 +704,24 @@ fn parse_bool_env(name: &str, value: &str) -> Result<bool> {
     }
 }
 
+fn parse_u32_env(name: &str, value: &str) -> Result<u32> {
+    value
+        .parse::<u32>()
+        .map_err(|err| config_error(format!("invalid {name} `{value}`: {err}")))
+}
+
+fn parse_u64_env(name: &str, value: &str) -> Result<u64> {
+    value
+        .parse::<u64>()
+        .map_err(|err| config_error(format!("invalid {name} `{value}`: {err}")))
+}
+
+fn parse_usize_env(name: &str, value: &str) -> Result<usize> {
+    value
+        .parse::<usize>()
+        .map_err(|err| config_error(format!("invalid {name} `{value}`: {err}")))
+}
+
 fn validate_profile_for_backend(name: &str, kind: BackendKind, profile: ProfileKind) -> Result<()> {
     let valid = matches!(
         (kind, profile),
@@ -731,6 +838,13 @@ anthropic_cache_injection = false
 reasoning_store = true
 observability_dump = true
 
+[backend_request]
+max_retries = 2
+initial_backoff_ms = 10
+max_backoff_ms = 100
+timeout_ms = 30000
+concurrency_limit = 8
+
 [routing]
 anthropic_messages_backend = "responses"
 responses_backend = "anthropic"
@@ -764,6 +878,11 @@ model = "gpt-5.1"
         assert!(!config.switches.anthropic_cache_injection);
         assert!(config.switches.reasoning_store);
         assert!(config.switches.observability_dump);
+        assert_eq!(config.backend_request.max_retries, 2);
+        assert_eq!(config.backend_request.initial_backoff_ms, 10);
+        assert_eq!(config.backend_request.max_backoff_ms, 100);
+        assert_eq!(config.backend_request.timeout_ms, Some(30_000));
+        assert_eq!(config.backend_request.concurrency_limit, Some(8));
         assert_eq!(
             config.routing.anthropic_messages_backend.as_deref(),
             Some("responses")
@@ -842,6 +961,11 @@ listen_addr = "127.0.0.1:17777"
             (CACHE_INJECTION_ENV, "off"),
             (REASONING_STORE_ENV, "yes"),
             (OBSERVABILITY_DUMP_ENV, "true"),
+            (BACKEND_MAX_RETRIES_ENV, "3"),
+            (BACKEND_INITIAL_BACKOFF_MS_ENV, "5"),
+            (BACKEND_MAX_BACKOFF_MS_ENV, "50"),
+            (BACKEND_TIMEOUT_MS_ENV, "15000"),
+            (BACKEND_CONCURRENCY_LIMIT_ENV, "4"),
             (
                 MODEL_ALIASES_ENV,
                 r#"{"sonnet":{"backend":"anthropic","model":"claude-env"}}"#,
@@ -854,6 +978,11 @@ listen_addr = "127.0.0.1:17777"
         assert!(!config.switches.anthropic_cache_injection);
         assert!(config.switches.reasoning_store);
         assert!(config.switches.observability_dump);
+        assert_eq!(config.backend_request.max_retries, 3);
+        assert_eq!(config.backend_request.initial_backoff_ms, 5);
+        assert_eq!(config.backend_request.max_backoff_ms, 50);
+        assert_eq!(config.backend_request.timeout_ms, Some(15_000));
+        assert_eq!(config.backend_request.concurrency_limit, Some(4));
         assert_eq!(config.anthropic_default_max_tokens, Some(8192));
         assert_eq!(
             config.backend("deepseek").unwrap().api_key.as_deref(),
@@ -949,6 +1078,36 @@ base_url = "https://api.deepseek.com"
         assert!(
             err.to_string()
                 .contains("backend `deepseek` is missing required `profile`")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_invalid_backend_request_limits() {
+        let err = Config::from_toml_str(
+            r#"
+[backend_request]
+initial_backoff_ms = 100
+max_backoff_ms = 50
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("max_backoff_ms must be greater than or equal")
+        );
+
+        let err = Config::from_toml_str(
+            r#"
+[backend_request]
+concurrency_limit = 0
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("concurrency_limit must be greater than zero")
         );
     }
 }

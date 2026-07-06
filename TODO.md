@@ -761,8 +761,15 @@ Anthropic SSE → IR event → Responses SSE，index/类型对齐。
 - 新增单元测试覆盖 JSON/header dump 脱敏与配置开关解析。
 - 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 均通过。
 
-### M7-06 `[TODO]` 限流与重试
+### [DONE] M7-06 限流与重试
 对后端请求的重试与指数退避（尊重 `Retry-After`）。可配置并发/超时。
+
+完成记录：
+- 2026-07-06：已新增 `provider::backend_request` 统一后端 HTTP 请求控制层，支持对 408/425/429/5xx 与连接/超时类传输错误按指数退避重试，并解析 `Retry-After` 的秒数与 HTTP-date 格式。
+- 已新增全局 `backend_request` 配置与环境变量覆盖：`LLM_PROXY_BACKEND_MAX_RETRIES`、`LLM_PROXY_BACKEND_INITIAL_BACKOFF_MS`、`LLM_PROXY_BACKEND_MAX_BACKOFF_MS`、`LLM_PROXY_BACKEND_TIMEOUT_MS`、`LLM_PROXY_BACKEND_CONCURRENCY_LIMIT`；默认保持无重试、无超时、无限并发以兼容既有行为。
+- 已将该控制层接入 Chat、Responses、Anthropic 三类后端请求；并发限制通过 permit 包装 `BackendResponse`，流式响应会一直持有 permit 直到 body stream 结束或被丢弃，避免只限制到响应头。
+- 新增单元/路由测试覆盖 retryable status 重试、`Retry-After`、非 retryable 400 不重试、per-attempt timeout、流式响应持有并发 permit、配置文件/env 覆盖，以及 `/v1/messages` Chat backend 路由重试装配。
+- 验证：变更前基线 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all --all-targets` 通过；变更后 `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`cargo test --all --all-targets` 均通过。
 
 ### M7-07 `[TODO]` 端到端回归测试套件
 4 条链各录制若干真实会话（文本/reasoning/tool-use/多轮），做快照回归。整理成 `cargo test` 可跑的套件。

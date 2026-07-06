@@ -1,59 +1,26 @@
 # Execution Plan
 
-I will follow the repository task order without doing broad issue triage first. I will:
+I will use `TODO.md` as the source of truth, complete exactly the first incomplete task, update the task record, validate the result, commit the changes, and stop.
 
-1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Check the latest commit message only for unfinished work directly relevant to that selected task.
-3. Inspect the files and tests that the selected task references.
-4. Implement the task fully, or add the minimum prerequisite task to `TODO.md` if a concrete blocker makes completion impossible.
-5. Run formatting, linting, and relevant tests in the required order, expanding to the full suite if code changes require it.
-6. Update this file at major milestones, update `TODO.md` with the completion record and `[DONE]` prefix if the task is completed, and avoid routine `PLAN.md` changes unless phase-level planning changes.
-7. Commit all resulting changes with a descriptive message and then stop.
+## Steps
 
-## Current Task
+1. Read `TODO.md` to identify the first task whose title is not prefixed with `[DONE]`.
+2. Inspect only the files and context needed for that task, including `PLAN.md` only if phase-level context is required.
+3. Check the latest commit message for any unfinished issue that directly blocks or belongs to the selected task.
+4. Implement the selected task without changing unrelated behavior or working around spec mismatches.
+5. Run the required formatting, linting, and tests in the order specified by the task and project instructions.
+6. If validation exposes an unscheduled failing test or blocking mismatch, either fix it or add the minimum prerequisite task to `TODO.md` before the blocked task, then commit and stop.
+7. Mark the task title `[DONE]` in `TODO.md` and update its completion record with the implemented changes and validation performed.
+8. Commit all task-related changes with a clear message and the required co-author trailer.
 
-Selected task: `M7-04` — centralize unsupported-feature capability decisions in `protocol/capability.rs`.
+## Progress Log
 
-Planned execution:
-
-1. Use `TODO.md` as the source of truth and treat `M7-04` as the first incomplete task.
-2. Treat the latest `[M7-03] Improve error mapping` commit as completed context; no unfinished issue from that commit preempts `M7-04`.
-3. Inspect DESIGN §6.5 and the current IR-to-protocol encoders to find existing scattered drop / emulate / reject decisions.
-4. Add `src/protocol/capability.rs` with a centralized capability table for each `IR -> protocol` request direction and helper functions for extra-parameter filtering/rejection.
-5. Wire the existing Anthropic, Responses, and OpenAI Chat request encoders through the capability table without changing intended protocol output except where unsupported parameters should now be explicitly rejected.
-6. Add tests that lock drop / emulate / reject decisions, including the documented Responses `json_schema` to Anthropic tool-emulation policy.
-7. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, then `cargo test --all --all-targets`.
-8. Update `TODO.md` with `[DONE] M7-04` and completion evidence, update this file at key milestones, commit, and stop.
-
-Progress:
-
-- Re-read `TODO.md` and found `M7-04` is now the first incomplete task.
-- Baseline validation before code changes passed: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
-- Implemented `src/protocol/capability.rs` as the central `IR -> protocol` feature decision table for pass-through, drop, emulate, and reject behavior.
-- Wired OpenAI Chat, Anthropic Messages, and OpenAI Responses request encoders through the capability table, including structured-output and reasoning-effort emulation paths.
-- Added tests covering capability decisions, extra filtering, Responses json_schema emulation to Anthropic tools, Chat/Responses structured-output translation, and unsupported structured-output/tool conflicts.
-- Completed validation after changes: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` all passed.
-- Updated `TODO.md` to mark `M7-04` `[DONE]` with completion evidence.
-## Execution Plan - 2026-07-06
-
-I will follow `TODO.md` as the authoritative task list and complete exactly the first task whose heading is not prefixed with `[DONE]`.
-
-1. Read `TODO.md` first to identify the first incomplete task and its validation requirements.
-2. Check the latest commit only for directly relevant unfinished work tied to that task.
-3. Inspect only the files needed for the selected task.
-4. Implement the task fully, avoiding workaround behavior or spec deviations.
-5. Run the required formatting, linting, and tests in the requested order when code changes are made.
-6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and recording completion details.
-7. Update this plan file at major milestones.
-8. Commit all changes for this task with a descriptive message and stop.
-
-## Progress
-
-- Selected first incomplete task: `M7-05 Observability`.
-- Latest commit (`M7-04`) does not mention unfinished work directly blocking observability.
-- Next steps: inspect `main.rs`, config, backend clients, and route tests; then add structured request logging plus optional redacted request/response dumps.
-- Implemented structured per-request observability context, route/backend/latency/token logs, streaming usage tracking, and `LLM_PROXY_OBSERVABILITY_DUMP` redacted body dumps.
-- Refactored the cross-cutting observability implementation into `src/observability.rs` to avoid further bloating `src/main.rs`.
-- Updated related testing notes and redaction coverage tests.
-- Validation completed: baseline `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` passed before code changes; final `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets` passed after implementation and modularization.
-- Marked `M7-05 Observability` as `[DONE]` in `TODO.md`.
+- Started invocation and refreshed this plan file before inspecting the repository.
+- Read `TODO.md`; the first incomplete task is `M7-06 [TODO] 限流与重试`.
+- Next steps: inspect the latest commit for directly relevant unfinished work, then review configuration, backend client, routing, and tests needed to add backend retry/backoff plus configurable concurrency/timeout.
+- Latest commit is `M7-05` observability and does not identify an unfinished issue that blocks M7-06.
+- Baseline validation passed: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all --all-targets`.
+- Implementation plan: add global backend request configuration, centralize backend HTTP send/retry/concurrency handling in a provider module, wire it into Chat/Responses/Anthropic backend calls, add targeted tests for retries, `Retry-After`, timeout, and stream-held concurrency permits, then update `TODO.md` and commit.
+- Implemented backend request controls in `provider::backend_request`, wired them into Chat, Responses, and Anthropic backend calls, and added config/env support for retries, backoff, timeout, and concurrency.
+- Validation passed after changes: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `cargo test --all --all-targets`.
+- Next step: mark `M7-06` done in `TODO.md`, include the completion record, and commit all task changes.
