@@ -1,7 +1,10 @@
 //! Request-scoped structured logging and redacted debug dumps.
 
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -14,6 +17,7 @@ use crate::{
     config::BackendKind,
     error,
     ir::{self, event::IrEvent},
+    metrics::MetricsRegistry,
     provider::router::{FrontendEndpoint, ModelRoute},
 };
 
@@ -28,6 +32,7 @@ pub(crate) struct RequestObservation {
     started: Instant,
     dump_bodies: bool,
     route: Option<RouteObservation>,
+    metrics: Arc<MetricsRegistry>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,13 +47,18 @@ struct RouteObservation {
 
 impl RequestObservation {
     /// Creates a new request-scoped log context.
-    pub(crate) fn new(frontend: FrontendEndpoint, dump_bodies: bool) -> Self {
+    pub(crate) fn new(
+        frontend: FrontendEndpoint,
+        dump_bodies: bool,
+        metrics: Arc<MetricsRegistry>,
+    ) -> Self {
         Self {
             request_id: NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
             frontend: frontend_path(frontend),
             started: Instant::now(),
             dump_bodies,
             route: None,
+            metrics,
         }
     }
 
@@ -99,6 +109,13 @@ impl RequestObservation {
     /// Logs successful completion with normalized token usage when available.
     pub(crate) fn log_success(&self, usage: Option<&ir::request::Usage>) {
         let token_usage = TokenUsageLog::from_usage(usage);
+        if let Some(route) = self.route.as_ref() {
+            self.metrics.record_success(
+                &route.backend_name,
+                token_usage.input_tokens,
+                token_usage.output_tokens,
+            );
+        }
         info!(
             request_id = self.request_id,
             frontend = self.frontend,
@@ -120,6 +137,9 @@ impl RequestObservation {
 
     /// Logs a request failure before an HTTP error response is formatted.
     pub(crate) fn log_error(&self, error: &error::ProxyError) {
+        if let Some(route) = self.route.as_ref() {
+            self.metrics.record_failure(&route.backend_name);
+        }
         warn!(
             request_id = self.request_id,
             frontend = self.frontend,
@@ -138,6 +158,9 @@ impl RequestObservation {
     /// Logs an error that occurs after a streaming HTTP response has started.
     fn log_stream_error(&self, error: &error::ProxyError, usage: Option<&ir::request::Usage>) {
         let token_usage = TokenUsageLog::from_usage(usage);
+        if let Some(route) = self.route.as_ref() {
+            self.metrics.record_failure(&route.backend_name);
+        }
         warn!(
             request_id = self.request_id,
             frontend = self.frontend,
@@ -161,6 +184,15 @@ impl RequestObservation {
     /// Logs a stream that ended without a terminal IR event.
     fn log_stream_end_without_terminal(&self, usage: Option<&ir::request::Usage>) {
         let token_usage = TokenUsageLog::from_usage(usage);
+        // The client already received a 200 plus partial content, so count it as a success with
+        // whatever token usage was observed rather than as a failed request.
+        if let Some(route) = self.route.as_ref() {
+            self.metrics.record_success(
+                &route.backend_name,
+                token_usage.input_tokens,
+                token_usage.output_tokens,
+            );
+        }
         warn!(
             request_id = self.request_id,
             frontend = self.frontend,

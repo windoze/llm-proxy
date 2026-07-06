@@ -153,6 +153,22 @@ additional_query_params = { "api-version" = "2024-02-01" }
 additional_headers = { "x-custom-gateway" = "value" }
 ```
 
+### 运行指标（Metrics）
+
+`GET /metrics` 以 JSON 返回轻量的内存计数：每个模型别名当前活跃的后端目标（反映 failover 切换后的实际目标），以及每个后端的成功请求数、失败请求数、输入/输出 token 累计值。这些计数是尽力而为的可观测性数据——流式响应仅在上游上报 token 时才计入，而在解析到后端之前就失败的请求（鉴权或路由错误）不会归属到任何后端。配置了代理 API key 时该端点同样需要鉴权（与其它路由一致）；`/health` 始终无需鉴权。
+
+```console
+$ curl -s http://127.0.0.1:8080/metrics
+{
+  "aliases": [
+    { "alias": "claude-code-default", "backend": "deepseek", "model": "deepseek-chat" }
+  ],
+  "backends": [
+    { "backend": "deepseek", "success_requests": 2, "failure_requests": 0, "input_tokens": 24, "output_tokens": 10 }
+  ]
+}
+```
+
 ### 重要环境变量
 
 | 变量 | 用途 |

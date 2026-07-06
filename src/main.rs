@@ -1,5 +1,7 @@
 //! HTTP server entry point for the proxy.
 
+use std::sync::Arc;
+
 use anyhow::Context;
 use axum::{
     Json, Router,
@@ -17,6 +19,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
+    metrics::{AliasTargetMetrics, MetricsRegistry, MetricsSnapshot},
     observability::{RequestObservation, observe_ir_event_stream},
     protocol::{
         anthropic::{
@@ -49,6 +52,7 @@ use crate::{
 mod config;
 pub mod error;
 mod ir;
+mod metrics;
 mod observability;
 mod protocol;
 mod provider;
@@ -67,6 +71,7 @@ struct AppState {
     proxy_api_key: Option<String>,
     passthrough_upstream_url: Option<String>,
     router: ModelRouter,
+    metrics: Arc<MetricsRegistry>,
     anthropic_default_max_tokens: Option<u32>,
     anthropic_cache_control: AnthropicCacheControlInjection,
     observability_dump: bool,
@@ -86,11 +91,15 @@ impl AppState {
         let observability_dump = config.switches.observability_dump;
         let backend_request_controls = BackendRequestControls::from_config(&config.backend_request);
 
+        let router = ModelRouter::new(config);
+        let metrics = Arc::new(MetricsRegistry::with_backends(router.backend_names()));
+
         Self {
             http_client: reqwest::Client::new(),
             proxy_api_key,
             passthrough_upstream_url,
-            router: ModelRouter::new(config),
+            router,
+            metrics,
             anthropic_default_max_tokens,
             anthropic_cache_control,
             observability_dump,
@@ -136,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
 fn app_with_state(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics_endpoint))
         .route("/passthrough", post(passthrough))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/responses", post(openai_responses))
@@ -146,6 +156,32 @@ fn app_with_state(state: AppState) -> Router {
 /// Reports whether the process is alive and able to serve HTTP requests.
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+/// Returns per-backend request/token counters and each alias's currently active backend target.
+///
+/// Requires the proxy API key when one is configured; otherwise open, like the other routes.
+async fn metrics_endpoint(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authenticate(&headers, state.proxy_api_key.as_deref()) {
+        return error.into_response();
+    }
+
+    let aliases = state
+        .router
+        .active_alias_targets()
+        .into_iter()
+        .map(|(alias, backend, model)| AliasTargetMetrics {
+            alias,
+            backend,
+            model,
+        })
+        .collect();
+    let snapshot = MetricsSnapshot {
+        aliases,
+        backends: state.metrics.snapshot(),
+    };
+
+    Json(snapshot).into_response()
 }
 
 /// Streams the incoming request body to the configured upstream URL and streams the response back.
@@ -199,6 +235,7 @@ async fn anthropic_messages(
     let mut observation = RequestObservation::new(
         FrontendEndpoint::AnthropicMessages,
         state.observability_dump,
+        Arc::clone(&state.metrics),
     );
     let result = match authenticate(&headers, state.proxy_api_key.as_deref()) {
         Ok(()) => match body {
@@ -273,8 +310,11 @@ async fn openai_responses(
     headers: HeaderMap,
     body: std::result::Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let mut observation =
-        RequestObservation::new(FrontendEndpoint::OpenAiResponses, state.observability_dump);
+    let mut observation = RequestObservation::new(
+        FrontendEndpoint::OpenAiResponses,
+        state.observability_dump,
+        Arc::clone(&state.metrics),
+    );
     let result = match authenticate(&headers, state.proxy_api_key.as_deref()) {
         Ok(()) => match body {
             Ok(Json(body)) => {
@@ -1163,6 +1203,136 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(value, json!({ "status": "ok" }));
+    }
+
+    #[tokio::test]
+    async fn metrics_route_reports_backend_counts_and_alias_targets() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl_metrics",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "hi" },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 7, "completion_tokens": 3 }
+            })))
+            .mount(&upstream)
+            .await;
+
+        let app = app_with_state(AppState::from_config(config::Config {
+            backends: vec![config::BackendConfig {
+                name: "deepseek".to_owned(),
+                kind: Some(config::BackendKind::Chat),
+                endpoint: Some(format!("{}/chat/completions", upstream.uri())),
+                api_key: Some("backend-secret".to_owned()),
+                profile: Some(config::ProfileKind::DeepSeek),
+                ..config::BackendConfig::default()
+            }],
+            model_aliases: std::collections::BTreeMap::from([(
+                "claude-code-default".to_owned(),
+                config::ModelAlias {
+                    targets: vec![config::AliasTarget {
+                        backend: "deepseek".to_owned(),
+                        model: "deepseek-chat".to_owned(),
+                    }],
+                    ..config::ModelAlias::default()
+                },
+            )]),
+            ..config::Config::default()
+        }));
+
+        // Drive one successful request through the alias.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "claude-code-default",
+                            "messages": [{ "role": "user", "content": "hi" }],
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            value["aliases"],
+            json!([{
+                "alias": "claude-code-default",
+                "backend": "deepseek",
+                "model": "deepseek-chat"
+            }])
+        );
+        assert_eq!(
+            value["backends"],
+            json!([{
+                "backend": "deepseek",
+                "success_requests": 1,
+                "failure_requests": 0,
+                "input_tokens": 7,
+                "output_tokens": 3
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_route_requires_proxy_api_key_when_configured() {
+        let app =
+            test_app_with_proxy_api_key("http://unused.example/chat/completions".to_owned(), "secret");
+
+        // Missing credential is rejected.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct credential is accepted.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// Builds an app with a chat backend plus an enforced proxy-level API key.

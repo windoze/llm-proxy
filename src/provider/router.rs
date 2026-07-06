@@ -76,6 +76,32 @@ impl ModelRouter {
         Self { config, failover }
     }
 
+    /// Returns the names of all configured backends (including the implicit DeepSeek default).
+    pub fn backend_names(&self) -> Vec<String> {
+        self.config
+            .backends
+            .iter()
+            .map(|backend| backend.name.clone())
+            .collect()
+    }
+
+    /// Returns each model alias with its currently active backend target (reflecting failover).
+    ///
+    /// Aliases are returned sorted by name for stable output.
+    pub fn active_alias_targets(&self) -> Vec<(String, String, String)> {
+        self.config
+            .model_aliases
+            .iter()
+            .filter_map(|(alias, model_alias)| {
+                let targets = model_alias.targets();
+                let last_index = targets.len().checked_sub(1)?;
+                let active_index = self.failover.current_index(alias).min(last_index);
+                let target = &targets[active_index];
+                Some((alias.clone(), target.backend.clone(), target.model.clone()))
+            })
+            .collect()
+    }
+
     /// Resolves a client model for a specific frontend endpoint.
     pub fn route(
         &self,

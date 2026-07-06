@@ -153,6 +153,22 @@ additional_query_params = { "api-version" = "2024-02-01" }
 additional_headers = { "x-custom-gateway" = "value" }
 ```
 
+### Metrics
+
+`GET /metrics` returns lightweight in-memory counters as JSON: each model alias's currently active backend target (reflecting any failover switch), and per-backend monotonic totals for successful requests, failed requests, and input/output tokens. Counters are best-effort observability — streaming responses count tokens only when the upstream reports them, and requests that fail before a backend is resolved (auth or routing errors) are not attributed to any backend. The endpoint requires the proxy API key when one is configured (like the other routes); `/health` remains unauthenticated.
+
+```console
+$ curl -s http://127.0.0.1:8080/metrics
+{
+  "aliases": [
+    { "alias": "claude-code-default", "backend": "deepseek", "model": "deepseek-chat" }
+  ],
+  "backends": [
+    { "backend": "deepseek", "success_requests": 2, "failure_requests": 0, "input_tokens": 24, "output_tokens": 10 }
+  ]
+}
+```
+
 ### Important environment variables
 
 | Variable | Purpose |
