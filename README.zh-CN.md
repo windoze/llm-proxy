@@ -97,6 +97,25 @@ backend = "anthropic"
 model = "claude-opus-compatible"
 ```
 
+### 后端故障切换（failover）
+
+一个模型别名可以配置多个后端目标：下标 0 为首选，其余为故障切换候选。当当前活跃后端在一个滑动时间窗口内累计足够多的失败（HTTP 429、5xx，或连接/超时错误）时，别名会为**后续**请求切换到下一个目标。切换是单向的（不会回退到更靠前的首选目标），并受最小切换间隔限制——即便失败次数已达阈值，只要距上次切换的时间未到该间隔，也不会切换。触发阈值的那一次请求仍会照常返回错误，只有之后的请求才会使用新目标。
+
+```toml
+[model_aliases."codex-default"]
+targets = [
+  { backend = "responses", model = "gpt-5.1" },
+  { backend = "anthropic", model = "claude-sonnet-4-5" },
+]
+
+[model_aliases."codex-default".failover]
+window_ms = 60000              # 统计失败的滑动窗口
+failure_threshold = 3          # 窗口内达到该失败次数即满足切换条件
+min_switch_interval_ms = 30000 # 两次切换之间的最小间隔
+```
+
+`failover` 块可选；省略时默认为 `window_ms = 60000`、`failure_threshold = 3`、`min_switch_interval_ms = 30000`。旧的单目标写法（`backend = "..."` + `model = "..."`）仍然支持，等价于只有一个 `targets` 条目且不带 failover。
+
 不要提交真实凭据。请将密钥保存在本地环境变量或未纳入版本控制的本地配置中。对应上面的示例：
 
 ```bash

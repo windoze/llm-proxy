@@ -1,13 +1,15 @@
 //! Model-to-backend routing based on configured aliases and frontend endpoint.
 
-use std::fmt;
+use std::{fmt, sync::Arc, time::Instant};
+
+use tracing::warn;
 
 use crate::{
     config::{BackendConfig, BackendKind, Config, ModelAlias, ProfileKind},
     error::{ProxyError, Result},
 };
 
-use super::{CapabilityProfile, GenericOpenAi, deepseek::DeepSeek};
+use super::{CapabilityProfile, GenericOpenAi, deepseek::DeepSeek, failover::FailoverRegistry};
 
 /// Client-facing endpoint family used to constrain valid upstream routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,13 +65,15 @@ impl fmt::Display for FrontendEndpoint {
 #[derive(Debug, Clone)]
 pub struct ModelRouter {
     config: Config,
+    failover: Arc<FailoverRegistry>,
 }
 
 impl ModelRouter {
     /// Creates a router and preserves the legacy DeepSeek default when no chat backend is configured.
     pub fn new(mut config: Config) -> Self {
         ensure_default_chat_backend(&mut config);
-        Self { config }
+        let failover = Arc::new(FailoverRegistry::from_config(&config));
+        Self { config, failover }
     }
 
     /// Resolves a client model for a specific frontend endpoint.
@@ -122,13 +126,29 @@ impl ModelRouter {
         requested_model: &str,
         alias: &ModelAlias,
     ) -> Result<ModelRoute<'_>> {
-        let backend = self.config.backend(&alias.backend).ok_or_else(|| {
+        let targets = alias.targets();
+        let active_index = self.failover.current_index(requested_model).min(
+            targets
+                .len()
+                .checked_sub(1)
+                .expect("validated alias always has at least one target"),
+        );
+        let target = &targets[active_index];
+        let backend = self.config.backend(&target.backend).ok_or_else(|| {
             config_error(format!(
                 "model alias `{requested_model}` references missing backend `{}`",
-                alias.backend
+                target.backend
             ))
         })?;
-        self.build_route(endpoint, requested_model, alias.model.clone(), backend)
+        let mut route = self.build_route(endpoint, requested_model, target.model.clone(), backend)?;
+        if targets.len() > 1 {
+            route.failover = Some(FailoverReport {
+                alias: requested_model.to_owned(),
+                active_index,
+                registry: Arc::clone(&self.failover),
+            });
+        }
+        Ok(route)
     }
 
     fn legacy_override_kind(&self, endpoint: FrontendEndpoint) -> Result<Option<BackendKind>> {
@@ -205,8 +225,17 @@ impl ModelRouter {
             backend,
             kind,
             profile,
+            failover: None,
         })
     }
+}
+
+/// Handle for reporting a failed request against a multi-target alias.
+#[derive(Debug, Clone)]
+struct FailoverReport {
+    alias: String,
+    active_index: usize,
+    registry: Arc<FailoverRegistry>,
 }
 
 /// Resolved model route with the selected backend and rewritten upstream model name.
@@ -218,6 +247,7 @@ pub struct ModelRoute<'a> {
     backend: &'a BackendConfig,
     kind: BackendKind,
     profile: ProfileKind,
+    failover: Option<FailoverReport>,
 }
 
 impl<'a> ModelRoute<'a> {
@@ -249,6 +279,25 @@ impl<'a> ModelRoute<'a> {
     /// Returns the model name that should be sent to the selected backend.
     pub fn backend_model(&self) -> &str {
         &self.backend_model
+    }
+
+    /// Reports that the request on this route failed, possibly advancing the alias failover target.
+    ///
+    /// No-op for single-target aliases and implicit/legacy routes. When the alias's failover policy
+    /// is satisfied, the shared registry advances to the next backend for subsequent requests; the
+    /// current request is unaffected.
+    pub fn report_failure(&self) {
+        let Some(report) = self.failover.as_ref() else {
+            return;
+        };
+        if let Some(new_index) = report.registry.record_failure(&report.alias, Instant::now()) {
+            warn!(
+                alias = %report.alias,
+                from_index = report.active_index,
+                to_index = new_index,
+                "failover switched model alias to next backend target"
+            );
+        }
     }
 
     /// Builds the OpenAI Chat-compatible capability profile for this route.

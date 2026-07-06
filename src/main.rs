@@ -231,8 +231,10 @@ async fn anthropic_messages_inner(
         config::BackendKind::Chat => {
             let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
-            let upstream_response =
-                send_chat_request(state, &headers, route.backend(), chat_body, observation).await?;
+            let upstream_response = report_failover(
+                &route,
+                send_chat_request(state, &headers, route.backend(), chat_body, observation).await,
+            )?;
 
             if ir_request.stream {
                 chat_stream_to_anthropic_response(upstream_response, observation.clone()).await
@@ -242,8 +244,10 @@ async fn anthropic_messages_inner(
         }
         config::BackendKind::Responses => {
             let responses_body = ir_request_to_responses(&ir_request)?;
-            let upstream_response =
-                send_responses_request(state, route.backend(), responses_body, observation).await?;
+            let upstream_response = report_failover(
+                &route,
+                send_responses_request(state, route.backend(), responses_body, observation).await,
+            )?;
 
             if ir_request.stream {
                 responses_stream_to_anthropic_response(upstream_response, observation.clone()).await
@@ -299,8 +303,10 @@ async fn openai_responses_inner(
         config::BackendKind::Chat => {
             let profile = route.chat_profile()?;
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
-            let upstream_response =
-                send_chat_request(state, &headers, route.backend(), chat_body, observation).await?;
+            let upstream_response = report_failover(
+                &route,
+                send_chat_request(state, &headers, route.backend(), chat_body, observation).await,
+            )?;
 
             if ir_request.stream {
                 chat_stream_to_responses_response(upstream_response, observation.clone()).await
@@ -311,8 +317,10 @@ async fn openai_responses_inner(
         config::BackendKind::Anthropic => {
             apply_anthropic_defaults(&mut ir_request, state, route.backend())?;
             let anthropic_body = ir_request_to_anthropic(&ir_request)?;
-            let upstream_response =
-                send_anthropic_request(state, route.backend(), anthropic_body, observation).await?;
+            let upstream_response = report_failover(
+                &route,
+                send_anthropic_request(state, route.backend(), anthropic_body, observation).await,
+            )?;
 
             if ir_request.stream {
                 anthropic_stream_to_responses_response(upstream_response, observation.clone()).await
@@ -329,6 +337,22 @@ async fn openai_responses_inner(
 
 fn json_rejection_error(rejection: JsonRejection) -> error::ProxyError {
     error::ProxyError::ProtocolMapping(format!("invalid JSON request body: {rejection}"))
+}
+
+/// Reports a countable backend failure to the route's failover policy, then passes the result through.
+///
+/// The current request result is returned unchanged; only the alias's active target may advance for
+/// subsequent requests.
+fn report_failover<T>(
+    route: &provider::router::ModelRoute<'_>,
+    result: error::Result<T>,
+) -> error::Result<T> {
+    if let Err(error) = &result
+        && provider::failover::is_failover_countable(error)
+    {
+        route.report_failure();
+    }
+    result
 }
 
 async fn send_chat_request(
@@ -3283,5 +3307,162 @@ mod tests {
                 }
             })
         );
+    }
+
+    /// Builds an app with two chat backends and a two-target failover alias.
+    fn test_app_with_failover_alias(
+        primary_url: String,
+        fallback_url: String,
+        failover: config::FailoverPolicy,
+    ) -> Router {
+        app_with_state(AppState::from_config(config::Config {
+            backends: vec![
+                config::BackendConfig {
+                    name: "primary".to_owned(),
+                    kind: Some(config::BackendKind::Chat),
+                    endpoint: Some(primary_url),
+                    api_key: Some("primary-secret".to_owned()),
+                    profile: Some(config::ProfileKind::DeepSeek),
+                    ..config::BackendConfig::default()
+                },
+                config::BackendConfig {
+                    name: "fallback".to_owned(),
+                    kind: Some(config::BackendKind::Chat),
+                    endpoint: Some(fallback_url),
+                    api_key: Some("fallback-secret".to_owned()),
+                    profile: Some(config::ProfileKind::DeepSeek),
+                    ..config::BackendConfig::default()
+                },
+            ],
+            model_aliases: std::collections::BTreeMap::from([(
+                "failover-model".to_owned(),
+                config::ModelAlias {
+                    targets: vec![
+                        config::AliasTarget {
+                            backend: "primary".to_owned(),
+                            model: "primary-chat".to_owned(),
+                        },
+                        config::AliasTarget {
+                            backend: "fallback".to_owned(),
+                            model: "fallback-chat".to_owned(),
+                        },
+                    ],
+                    failover: Some(failover),
+                    ..config::ModelAlias::default()
+                },
+            )]),
+            ..config::Config::default()
+        }))
+    }
+
+    fn chat_success_body(text: &str) -> Value {
+        json!({
+            "id": "chatcmpl_failover",
+            "model": "chat",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": text },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        })
+    }
+
+    #[tokio::test]
+    async fn failover_switches_to_fallback_after_threshold_reached() {
+        let primary = MockServer::start().await;
+        let fallback = MockServer::start().await;
+
+        // Primary always rate-limits.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .mount(&primary)
+            .await;
+        // Fallback always succeeds.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("from fallback")))
+            .mount(&fallback)
+            .await;
+
+        let app = test_app_with_failover_alias(
+            format!("{}/chat/completions", primary.uri()),
+            format!("{}/chat/completions", fallback.uri()),
+            config::FailoverPolicy {
+                window_ms: 60_000,
+                failure_threshold: 2,
+                min_switch_interval_ms: 1,
+            },
+        );
+
+        let request = || {
+            json!({
+                "model": "failover-model",
+                "messages": [{ "role": "user", "content": "hi" }]
+            })
+        };
+
+        // Request 1: primary 429, failure count 1 (no switch); current request still errors.
+        let first = post_messages(app.clone(), request()).await;
+        assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Request 2: primary 429, failure count reaches threshold → switch; this request still errors.
+        let second = post_messages(app.clone(), request()).await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Request 3: now routed to the fallback backend.
+        let third = post_messages(app.clone(), request()).await;
+        assert_eq!(third.status(), StatusCode::OK);
+        let body = to_bytes(third.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["content"][0]["text"], "from fallback");
+
+        assert_eq!(primary.received_requests().await.unwrap().len(), 2);
+        assert_eq!(fallback.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failover_stays_on_primary_until_threshold_reached() {
+        let primary = MockServer::start().await;
+        let fallback = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .mount(&primary)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("from fallback")))
+            .mount(&fallback)
+            .await;
+
+        // A high threshold is never reached across a few requests, so the alias stays on primary.
+        // (The min-switch-interval gate is exercised directly by the failover unit tests.)
+        let app = test_app_with_failover_alias(
+            format!("{}/chat/completions", primary.uri()),
+            format!("{}/chat/completions", fallback.uri()),
+            config::FailoverPolicy {
+                window_ms: 60_000,
+                failure_threshold: 100,
+                min_switch_interval_ms: 1,
+            },
+        );
+
+        let request = || {
+            json!({
+                "model": "failover-model",
+                "messages": [{ "role": "user", "content": "hi" }]
+            })
+        };
+
+        for _ in 0..3 {
+            let response = post_messages(app.clone(), request()).await;
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        assert_eq!(primary.received_requests().await.unwrap().len(), 3);
+        assert_eq!(fallback.received_requests().await.unwrap().len(), 0);
     }
 }
