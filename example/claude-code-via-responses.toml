@@ -1,0 +1,53 @@
+# 示例：让 Claude Code 走 OpenAI Responses API 后端
+#
+# Claude Code 使用 Anthropic Messages 协议，请求打到代理的 POST /v1/messages。
+# 本配置把这些请求路由到一个 OpenAI Responses 兼容后端。
+#
+# 用法：
+#   export LLM_PROXY_CONFIG="$PWD/example/claude-code-via-responses.toml"
+#   # 后端凭据可以写在下面的 api_key 里，也可以用环境变量覆盖（推荐）：
+#   export OPENAI_API_KEY="<你的 Responses 后端 key>"
+#   cargo run
+#
+#   # 另一个 shell 里指向代理：
+#   export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+#   export ANTHROPIC_AUTH_TOKEN="local-placeholder"
+#   claude -p "Use one sentence to say hello through llm-proxy."
+
+listen_addr = "127.0.0.1:8080"
+
+[switches]
+# Responses 后端会自动强制 store=false 并携带 reasoning.encrypted_content。
+reasoning_store = false
+observability_dump = false
+
+[backend_request]
+max_retries = 2
+initial_backoff_ms = 250
+max_backoff_ms = 5000
+timeout_ms = 120000
+concurrency_limit = 16
+
+# OpenAI Responses 兼容后端。
+[[backends]]
+name = "responses"
+type = "responses"
+endpoint = "https://api.openai.com/v1/responses"
+# 若通过 OPENAI_API_KEY 环境变量提供密钥，可删除下面这行。
+api_key = "REPLACE_WITH_RESPONSES_API_KEY"
+profile = "generic_openai"
+
+# 兜底路由：当客户端模型名没有命中下面的 model_aliases 时，
+# 让 /v1/messages（Claude Code）的请求走 responses 后端。
+[routing]
+anthropic_messages_backend = "responses"
+
+# 可选：把 Claude Code 常用的模型名精确映射到上游 Responses 模型。
+# 精确别名优先于上面的兜底路由。
+[model_aliases."claude-code-rich"]
+backend = "responses"
+model = "gpt-5.5"
+
+[model_aliases."claude-sonnet-4-5"]
+backend = "responses"
+model = "gpt-5.5"

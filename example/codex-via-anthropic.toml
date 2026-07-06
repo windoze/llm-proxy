@@ -1,0 +1,59 @@
+# 示例：让 Codex 走 Anthropic Messages API 后端
+#
+# Codex 使用 OpenAI Responses 协议，请求打到代理的 POST /v1/responses。
+# 本配置把这些请求路由到一个 Anthropic Messages 兼容后端。
+#
+# 用法：
+#   export LLM_PROXY_CONFIG="$PWD/example/codex-via-anthropic.toml"
+#   # 后端凭据可以写在下面的 api_key 里，也可以用环境变量覆盖（推荐）：
+#   export ANTHROPIC_AUTH_TOKEN="<你的 Anthropic 后端 key>"
+#   cargo run
+#
+#   # 另一个 shell 里指向代理：
+#   export CODEX_HOME="$(mktemp -d)"
+#   export OPENAI_API_KEY="local-placeholder"
+#   # 把 Codex 的 provider base-url 配置为 http://127.0.0.1:8080/v1
+#   codex exec "Use one sentence to say hello through llm-proxy."
+
+listen_addr = "127.0.0.1:8080"
+# Codex 客户端可能不传 max_tokens，Anthropic 后端要求该字段，这里给默认值。
+anthropic_default_max_tokens = 4096
+
+[switches]
+# 无状态 cache-control 注入（Anthropic 后端专用），可按需关闭。
+anthropic_cache_injection = true
+observability_dump = false
+
+[backend_request]
+max_retries = 2
+initial_backoff_ms = 250
+max_backoff_ms = 5000
+timeout_ms = 120000
+concurrency_limit = 16
+
+# Anthropic Messages 兼容后端。
+[[backends]]
+name = "anthropic"
+type = "anthropic"
+base_url = "https://api.anthropic.com"
+# 若通过 ANTHROPIC_AUTH_TOKEN 环境变量提供密钥，可删除下面这行。
+api_key = "REPLACE_WITH_ANTHROPIC_API_KEY"
+profile = "anthropic"
+anthropic_version = "2023-06-01"
+# Codex 客户端未命中别名时使用的默认上游模型。
+default_model = "claude-opus-4-8"
+
+# 兜底路由：当客户端模型名没有命中下面的 model_aliases 时，
+# 让 /v1/responses（Codex）的请求走 anthropic 后端。
+[routing]
+responses_backend = "anthropic"
+
+# 可选：把 Codex 常用的模型名精确映射到上游 Anthropic 模型。
+# 精确别名优先于上面的兜底路由。
+[model_aliases."codex-rich"]
+backend = "anthropic"
+model = "claude-opus-4-8"
+
+[model_aliases."gpt-5.5-codex"]
+backend = "anthropic"
+model = "claude-opus-4-8"

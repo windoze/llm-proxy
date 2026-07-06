@@ -1,5 +1,7 @@
 # llm-proxy
 
+[English](./README.md) | [中文](./README.zh-CN.md)
+
 `llm-proxy` is a stateless LLM API gateway for coding agents. It exposes the two client-facing APIs used by Claude Code and Codex, then routes each request to a configured upstream backend while preserving tool calls, streaming events, usage, and reasoning payloads.
 
 The project currently exposes:
