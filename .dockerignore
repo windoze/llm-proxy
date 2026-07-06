@@ -1,0 +1,8 @@
+# Keep the build context small; the builder only needs source + manifests.
+/target
+.git
+.github
+.envrc
+*.md
+example
+memory
