@@ -34,6 +34,10 @@ pub enum ProxyError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// The downstream client failed proxy-level API key authentication.
+    #[error("authentication failed: {0}")]
+    Unauthorized(String),
+
     /// The upstream provider returned a non-success HTTP response.
     #[error("upstream returned status {status}: {body}")]
     UpstreamStatus {
@@ -142,6 +146,7 @@ impl ProxyError {
             Self::UnsupportedFeature { .. } => StatusCode::BAD_REQUEST,
             Self::ProtocolMapping(_) => StatusCode::BAD_REQUEST,
             Self::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::UpstreamStatus { status, .. } => *status,
         }
     }
@@ -153,6 +158,7 @@ impl ProxyError {
             Self::UnsupportedFeature { .. } => "unsupported_feature",
             Self::ProtocolMapping(_) => "protocol_mapping",
             Self::Config(_) => "config",
+            Self::Unauthorized(_) => "unauthorized",
             Self::UpstreamStatus { status, .. } if *status == StatusCode::TOO_MANY_REQUESTS => {
                 "upstream_rate_limit"
             }
@@ -167,6 +173,7 @@ impl ProxyError {
                 ErrorKind::InvalidRequest
             }
             Self::Config(_) | Self::UpstreamHttp(_) => ErrorKind::Server,
+            Self::Unauthorized(_) => ErrorKind::Authentication,
             Self::UpstreamStatus { status, .. } => match *status {
                 StatusCode::UNAUTHORIZED => ErrorKind::Authentication,
                 StatusCode::FORBIDDEN => ErrorKind::Permission,

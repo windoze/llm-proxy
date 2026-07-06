@@ -128,12 +128,38 @@ cargo run
 
 Run client commands in a separate shell from the proxy when variable names overlap. `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` can mean "Anthropic backend credentials" to the proxy process, but "Claude Code should call this base URL" to the Claude Code process; `OPENAI_API_KEY` can likewise be a Responses backend key for the proxy or a local placeholder for Codex.
 
+### Proxy authentication
+
+Set a top-level `api_key` (or the `LLM_PROXY_API_KEY` environment variable) to require downstream clients to authenticate. When configured, requests to `/v1/messages`, `/v1/responses`, and `/passthrough` must present the key via either `Authorization: Bearer <key>` or `x-api-key: <key>`; otherwise the proxy returns `401`. `/health` stays open. When `api_key` is unset the proxy accepts anonymous requests (the default, backward-compatible behavior).
+
+```toml
+api_key = "your-proxy-secret"   # or set LLM_PROXY_API_KEY
+```
+
+The proxy never forwards the downstream client's credentials to a backend: each backend uses only its own configured `api_key` (or the relevant `*_API_KEY` environment variable). A `chat` backend with no `api_key` is sent requests **without** an `Authorization` header — this avoids leaking the client/proxy key and supports key-less backends such as a default Ollama install. (`responses` and `anthropic` backends still require their own `api_key`.)
+
+### Backend additional headers and query parameters
+
+Each backend accepts optional `additional_headers` (alias `headers`) and `additional_query_params` (alias `query` / `query_params`) maps. They are attached to every request the proxy sends to that backend — useful for gateways requiring a custom header, or for Azure AI Foundry / Azure OpenAI which require an `api-version` query parameter.
+
+```toml
+[[backends]]
+name = "azure"
+type = "responses"
+endpoint = "https://your-resource.openai.azure.com/openai/responses"
+api_key = "<azure key>"
+profile = "generic_openai"
+additional_query_params = { "api-version" = "2024-02-01" }
+additional_headers = { "x-custom-gateway" = "value" }
+```
+
 ### Important environment variables
 
 | Variable | Purpose |
 |---|---|
 | `LLM_PROXY_CONFIG` | Path to TOML/YAML config file |
 | `LLM_PROXY_ADDR` | Listen address, default `127.0.0.1:8080` |
+| `LLM_PROXY_API_KEY` | Optional proxy-level API key required from downstream clients |
 | `DEEPSEEK_API_KEY` | Chat/DeepSeek backend API key |
 | `LLM_PROXY_CHAT_COMPLETIONS_URL` | Override Chat Completions endpoint |
 | `OPENAI_API_ENDPOINT` / `OPENAI_API_KEY` | Responses-compatible backend endpoint and key |

@@ -1,6 +1,7 @@
 //! Shared controls for outbound backend HTTP requests.
 
 use std::{
+    collections::BTreeMap,
     fmt,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -214,6 +215,24 @@ impl BackendResponse {
         }
         .boxed()
     }
+}
+
+/// Attaches configured backend-specific extra headers and query parameters to a request builder.
+///
+/// Headers are added as-is; query parameters are appended to any already present on the endpoint.
+pub fn apply_backend_extras(
+    mut builder: reqwest::RequestBuilder,
+    headers: &BTreeMap<String, String>,
+    query: &BTreeMap<String, String>,
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    if !query.is_empty() {
+        let pairs: Vec<(&String, &String)> = query.iter().collect();
+        builder = builder.query(&pairs);
+    }
+    builder
 }
 
 /// Reports whether an upstream HTTP status should be retried (and counts toward failover).

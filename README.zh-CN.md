@@ -128,12 +128,38 @@ cargo run
 
 当变量名存在重叠时，请在与代理进程不同的 shell 中运行客户端命令。`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 对代理进程而言可能表示「Anthropic 后端凭据」，但对 Claude Code 进程而言表示「Claude Code 应调用的 base URL」；同理，`OPENAI_API_KEY` 对代理而言可能是 Responses 后端 key，对 Codex 而言则可能只是本地占位符。
 
+### 代理鉴权
+
+设置顶层 `api_key`（或 `LLM_PROXY_API_KEY` 环境变量）即可要求下游客户端进行鉴权。配置后，访问 `/v1/messages`、`/v1/responses`、`/passthrough` 的请求必须通过 `Authorization: Bearer <key>` 或 `x-api-key: <key>` 之一携带该 key，否则代理返回 `401`；`/health` 保持开放。未设置 `api_key` 时代理接受匿名请求（默认，向后兼容）。
+
+```toml
+api_key = "your-proxy-secret"   # 或设置 LLM_PROXY_API_KEY
+```
+
+代理**从不**将下游客户端的凭据转发给后端：每个后端只使用它自己配置的 `api_key`（或相应的 `*_API_KEY` 环境变量）。未配置 `api_key` 的 `chat` 后端在发请求时**不带** `Authorization` header——这既避免把客户端/代理 key 泄露给后端，也支持无需 key 的后端（例如缺省配置的 Ollama）。（`responses` 与 `anthropic` 后端仍要求各自配置 `api_key`。）
+
+### 后端附加 Header 与 Query 参数
+
+每个后端都可配置可选的 `additional_headers`（别名 `headers`）与 `additional_query_params`（别名 `query` / `query_params`）映射。它们会被附加到代理发往该后端的每个请求上——适用于要求自定义 header 的网关，或要求 `api-version` query 参数的 Azure AI Foundry / Azure OpenAI。
+
+```toml
+[[backends]]
+name = "azure"
+type = "responses"
+endpoint = "https://your-resource.openai.azure.com/openai/responses"
+api_key = "<azure key>"
+profile = "generic_openai"
+additional_query_params = { "api-version" = "2024-02-01" }
+additional_headers = { "x-custom-gateway" = "value" }
+```
+
 ### 重要环境变量
 
 | 变量 | 用途 |
 |---|---|
 | `LLM_PROXY_CONFIG` | TOML/YAML 配置文件路径 |
 | `LLM_PROXY_ADDR` | 监听地址，默认 `127.0.0.1:8080` |
+| `LLM_PROXY_API_KEY` | 可选的代理级 API key，要求下游客户端携带 |
 | `DEEPSEEK_API_KEY` | Chat/DeepSeek 后端 API key |
 | `LLM_PROXY_CHAT_COMPLETIONS_URL` | 覆盖 Chat Completions 端点 |
 | `OPENAI_API_ENDPOINT` / `OPENAI_API_KEY` | Responses 兼容后端的端点和 key |

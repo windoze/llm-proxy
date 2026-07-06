@@ -1,0 +1,43 @@
+# 示例：代理鉴权 + Azure 风格后端附加 query 参数
+#
+# 本示例演示两项能力：
+#   1. 代理自身的 API key 鉴权：下游必须携带正确 key（api_key），否则返回 401。
+#      key 同时接受 `Authorization: Bearer <key>` 与 `x-api-key: <key>` 两种 header。
+#   2. 后端附加 header / query：向后端发请求时自动附带，满足 Azure AI Foundry /
+#      Azure OpenAI 要求的 `api-version` query 参数。
+#
+# 用法：
+#   export LLM_PROXY_CONFIG="$PWD/example/azure-with-proxy-auth.toml"
+#   cargo run
+#
+#   # 下游客户端（另一个 shell）：
+#   export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+#   export ANTHROPIC_AUTH_TOKEN="my-proxy-secret"   # 必须与下面的 api_key 一致
+#   claude -p "Use one sentence to say hello through llm-proxy."
+
+listen_addr = "127.0.0.1:8080"
+anthropic_default_max_tokens = 4096
+
+# 代理级 API key：配置后，/v1/messages、/v1/responses、/passthrough 都需要鉴权。
+# 也可用环境变量 LLM_PROXY_API_KEY 覆盖。/health 保持开放。
+api_key = "my-proxy-secret"
+
+[switches]
+anthropic_cache_injection = true
+observability_dump = false
+
+# Azure OpenAI（Responses 兼容）后端：附加 api-version query 参数。
+# 代理从不转发下游凭据：后端只用自己的 api_key。responses/anthropic 后端必须配置 api_key；
+# 无需 key 的 chat 后端（如缺省 Ollama）可不配 api_key，代理将不带 Authorization 头发送。
+[[backends]]
+name = "azure"
+type = "responses"
+endpoint = "https://your-resource.openai.azure.com/openai/responses"
+api_key = "REPLACE_WITH_AZURE_API_KEY"
+profile = "generic_openai"
+additional_query_params = { "api-version" = "2024-02-01" }
+additional_headers = { "x-custom-gateway" = "example" }
+
+[model_aliases."claude-sonnet-4-5"]
+backend = "azure"
+model = "gpt-5.1"

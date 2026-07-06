@@ -56,7 +56,6 @@ mod reasoning;
 mod stream;
 
 const PASSTHROUGH_UPSTREAM_URL_ENV: &str = config::PASSTHROUGH_UPSTREAM_URL_ENV;
-const DEEPSEEK_API_KEY_ENV: &str = config::DEEPSEEK_API_KEY_ENV;
 #[cfg(test)]
 const DEFAULT_ANTHROPIC_VERSION: &str = config::DEFAULT_ANTHROPIC_VERSION;
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = config::DEFAULT_ANTHROPIC_MAX_TOKENS;
@@ -65,6 +64,7 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = config::DEFAULT_ANTHROPIC_MAX_TOKENS;
 #[derive(Clone)]
 struct AppState {
     http_client: reqwest::Client,
+    proxy_api_key: Option<String>,
     passthrough_upstream_url: Option<String>,
     router: ModelRouter,
     anthropic_default_max_tokens: Option<u32>,
@@ -80,6 +80,7 @@ impl AppState {
         } else {
             AnthropicCacheControlInjection::Disabled
         };
+        let proxy_api_key = config.api_key.clone();
         let passthrough_upstream_url = config.passthrough_upstream_url.clone();
         let anthropic_default_max_tokens = config.anthropic_default_max_tokens;
         let observability_dump = config.switches.observability_dump;
@@ -87,6 +88,7 @@ impl AppState {
 
         Self {
             http_client: reqwest::Client::new(),
+            proxy_api_key,
             passthrough_upstream_url,
             router: ModelRouter::new(config),
             anthropic_default_max_tokens,
@@ -151,6 +153,9 @@ async fn passthrough(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> error::Result<Response> {
+    let (parts, body) = request.into_parts();
+    authenticate(&parts.headers, state.proxy_api_key.as_deref())?;
+
     let upstream_url = state.passthrough_upstream_url.as_deref().ok_or_else(|| {
         error::ProxyError::Config(format!("missing {PASSTHROUGH_UPSTREAM_URL_ENV}"))
     })?;
@@ -160,7 +165,6 @@ async fn passthrough(
         ))
     })?;
 
-    let (parts, body) = request.into_parts();
     let mut upstream_request = state
         .http_client
         .post(upstream_url)
@@ -196,12 +200,15 @@ async fn anthropic_messages(
         FrontendEndpoint::AnthropicMessages,
         state.observability_dump,
     );
-    let result = match body {
-        Ok(Json(body)) => {
-            observation.dump_frontend_request(&headers, &body);
-            anthropic_messages_inner(&state, headers, body, &mut observation).await
-        }
-        Err(rejection) => Err(json_rejection_error(rejection)),
+    let result = match authenticate(&headers, state.proxy_api_key.as_deref()) {
+        Ok(()) => match body {
+            Ok(Json(body)) => {
+                observation.dump_frontend_request(&headers, &body);
+                anthropic_messages_inner(&state, body, &mut observation).await
+            }
+            Err(rejection) => Err(json_rejection_error(rejection)),
+        },
+        Err(error) => Err(error),
     };
 
     match result {
@@ -215,7 +222,6 @@ async fn anthropic_messages(
 
 async fn anthropic_messages_inner(
     state: &AppState,
-    headers: HeaderMap,
     body: Value,
     observation: &mut RequestObservation,
 ) -> error::Result<Response> {
@@ -233,7 +239,7 @@ async fn anthropic_messages_inner(
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
             let upstream_response = report_failover(
                 &route,
-                send_chat_request(state, &headers, route.backend(), chat_body, observation).await,
+                send_chat_request(state, route.backend(), chat_body, observation).await,
             )?;
 
             if ir_request.stream {
@@ -269,12 +275,15 @@ async fn openai_responses(
 ) -> Response {
     let mut observation =
         RequestObservation::new(FrontendEndpoint::OpenAiResponses, state.observability_dump);
-    let result = match body {
-        Ok(Json(body)) => {
-            observation.dump_frontend_request(&headers, &body);
-            openai_responses_inner(&state, headers, body, &mut observation).await
-        }
-        Err(rejection) => Err(json_rejection_error(rejection)),
+    let result = match authenticate(&headers, state.proxy_api_key.as_deref()) {
+        Ok(()) => match body {
+            Ok(Json(body)) => {
+                observation.dump_frontend_request(&headers, &body);
+                openai_responses_inner(&state, body, &mut observation).await
+            }
+            Err(rejection) => Err(json_rejection_error(rejection)),
+        },
+        Err(error) => Err(error),
     };
 
     match result {
@@ -288,7 +297,6 @@ async fn openai_responses(
 
 async fn openai_responses_inner(
     state: &AppState,
-    headers: HeaderMap,
     body: Value,
     observation: &mut RequestObservation,
 ) -> error::Result<Response> {
@@ -305,7 +313,7 @@ async fn openai_responses_inner(
             let chat_body = ir_request_to_chat(&ir_request, &profile)?;
             let upstream_response = report_failover(
                 &route,
-                send_chat_request(state, &headers, route.backend(), chat_body, observation).await,
+                send_chat_request(state, route.backend(), chat_body, observation).await,
             )?;
 
             if ir_request.stream {
@@ -357,22 +365,26 @@ fn report_failover<T>(
 
 async fn send_chat_request(
     state: &AppState,
-    headers: &HeaderMap,
     backend: &config::BackendConfig,
     body: Value,
     observation: &RequestObservation,
 ) -> error::Result<BackendResponse> {
     observation.dump_json("upstream_request", &body);
     let upstream_url = parse_chat_completions_url(backend)?;
-    let bearer_token = upstream_bearer_token(backend, headers)?;
+    let bearer_token = backend_bearer_token(backend);
     state
         .backend_request_controls
         .send(|| {
-            state
-                .http_client
-                .post(upstream_url.clone())
-                .bearer_auth(bearer_token)
-                .json(&body)
+            let mut builder = state.http_client.post(upstream_url.clone());
+            if let Some(bearer_token) = bearer_token {
+                builder = builder.bearer_auth(bearer_token);
+            }
+            let builder = provider::backend_request::apply_backend_extras(
+                builder,
+                &backend.additional_headers,
+                &backend.additional_query_params,
+            );
+            builder.json(&body)
         })
         .await
 }
@@ -571,7 +583,11 @@ fn responses_backend_client(
 
     Ok(
         ResponsesBackendClient::with_http_client(state.http_client.clone(), endpoint, api_key)?
-            .with_request_controls(state.backend_request_controls.clone()),
+            .with_request_controls(state.backend_request_controls.clone())
+            .with_backend_extras(
+                backend.additional_headers.clone(),
+                backend.additional_query_params.clone(),
+            ),
     )
 }
 
@@ -599,7 +615,11 @@ fn anthropic_backend_client(
         anthropic_version,
     )?
     .with_cache_control_injection(state.anthropic_cache_control)
-    .with_request_controls(state.backend_request_controls.clone()))
+    .with_request_controls(state.backend_request_controls.clone())
+    .with_backend_extras(
+        backend.additional_headers.clone(),
+        backend.additional_query_params.clone(),
+    ))
 }
 
 /// Converts an Anthropic base URL into the concrete Messages API endpoint.
@@ -625,29 +645,59 @@ fn anthropic_messages_endpoint(backend: &config::BackendConfig) -> error::Result
     Ok(endpoint)
 }
 
-fn upstream_bearer_token<'a>(
-    backend: &'a config::BackendConfig,
-    headers: &'a HeaderMap,
-) -> error::Result<&'a str> {
-    if let Some(api_key) = backend.api_key.as_deref() {
-        return Ok(api_key);
+/// Returns the backend's configured API key, if any.
+///
+/// The proxy never forwards the downstream client's credentials to a backend. When a backend has no
+/// `api_key`, the request is sent without an `Authorization` header — this both avoids leaking the
+/// proxy/client key and supports key-less backends such as a default Ollama install.
+fn backend_bearer_token(backend: &config::BackendConfig) -> Option<&str> {
+    backend.api_key.as_deref()
+}
+
+/// Enforces optional proxy-level API key authentication for downstream requests.
+///
+/// Returns `Ok(())` when no proxy key is configured (open access). When a key is configured, the
+/// client must present it via `x-api-key` or `Authorization: Bearer <key>`; otherwise a `401` is
+/// returned. The comparison runs in constant time to avoid leaking the key through timing.
+fn authenticate(headers: &HeaderMap, expected: Option<&str>) -> error::Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+
+    let presented = client_api_key(headers)?;
+    match presented {
+        Some(presented) if constant_time_eq(presented.as_bytes(), expected.as_bytes()) => Ok(()),
+        _ => Err(error::ProxyError::Unauthorized(
+            "invalid or missing API key".to_owned(),
+        )),
+    }
+}
+
+/// Extracts the client-presented API key from `x-api-key` or a `Bearer` authorization header.
+fn client_api_key(headers: &HeaderMap) -> error::Result<Option<&str>> {
+    if let Some(api_key) = headers.get("x-api-key") {
+        let api_key = api_key.to_str().map_err(|err| {
+            error::ProxyError::ProtocolMapping(format!("x-api-key header is invalid: {err}"))
+        })?;
+        return Ok(Some(api_key));
     }
 
-    match headers.get("x-api-key") {
-        Some(api_key) => api_key.to_str().map_err(|err| {
-            error::ProxyError::ProtocolMapping(format!("x-api-key header is invalid: {err}"))
-        }),
-        None => match headers.get(header::AUTHORIZATION) {
-            Some(authorization) => bearer_token_from_authorization(authorization),
-            None if backend.name == "deepseek" => Err(error::ProxyError::Config(format!(
-                "missing {DEEPSEEK_API_KEY_ENV}"
-            ))),
-            None => Err(error::ProxyError::Config(format!(
-                "chat backend `{}` requires `api_key` or a client x-api-key/Authorization header",
-                backend.name
-            ))),
-        },
+    match headers.get(header::AUTHORIZATION) {
+        Some(authorization) => Ok(Some(bearer_token_from_authorization(authorization)?)),
+        None => Ok(None),
     }
+}
+
+/// Compares two byte slices in constant time relative to their contents.
+fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    if lhs.len() != rhs.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in lhs.iter().zip(rhs.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 fn bearer_token_from_authorization(value: &HeaderValue) -> error::Result<&str> {
@@ -1113,6 +1163,165 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(value, json!({ "status": "ok" }));
+    }
+
+    /// Builds an app with a chat backend plus an enforced proxy-level API key.
+    fn test_app_with_proxy_api_key(chat_completions_url: String, proxy_api_key: &str) -> Router {
+        app_with_state(AppState::from_config(config::Config {
+            api_key: Some(proxy_api_key.to_owned()),
+            backends: vec![config::BackendConfig {
+                name: "deepseek".to_owned(),
+                kind: Some(config::BackendKind::Chat),
+                endpoint: Some(chat_completions_url),
+                api_key: Some("backend-secret".to_owned()),
+                profile: Some(config::ProfileKind::DeepSeek),
+                ..config::BackendConfig::default()
+            }],
+            ..config::Config::default()
+        }))
+    }
+
+    fn chat_ok_mock_body() -> Value {
+        json!({
+            "id": "chatcmpl_1",
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "hi" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        })
+    }
+
+    #[tokio::test]
+    async fn health_route_open_without_proxy_api_key() {
+        let app = test_app_with_proxy_api_key("http://unused.example/chat/completions".to_owned(), "secret");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn messages_route_rejects_missing_and_wrong_proxy_api_key() {
+        let app = test_app_with_proxy_api_key("http://unused.example/chat/completions".to_owned(), "secret");
+
+        // Missing credential.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(claude_code_plain_text_request().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["error"]["type"], "authentication_error");
+
+        // Wrong credential.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header("x-api-key", "wrong")
+                    .body(Body::from(claude_code_plain_text_request().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn messages_route_accepts_correct_proxy_api_key_via_both_headers() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_ok_mock_body()))
+            .mount(&upstream)
+            .await;
+        let endpoint = format!("{}/chat/completions", upstream.uri());
+
+        // x-api-key path.
+        let response = test_app_with_proxy_api_key(endpoint.clone(), "secret")
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header("x-api-key", "secret")
+                    .body(Body::from(
+                        json!({
+                            "model": "deepseek-chat",
+                            "messages": [{ "role": "user", "content": "hi" }],
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Authorization: Bearer path.
+        let response = test_app_with_proxy_api_key(endpoint, "secret")
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(AUTHORIZATION, "Bearer secret")
+                    .body(Body::from(
+                        json!({
+                            "model": "deepseek-chat",
+                            "messages": [{ "role": "user", "content": "hi" }],
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn passthrough_rejects_missing_proxy_api_key() {
+        let app = app_with_state(AppState::from_config(config::Config {
+            api_key: Some("secret".to_owned()),
+            passthrough_upstream_url: Some("http://unused.example/stream".to_owned()),
+            ..config::Config::default()
+        }));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/passthrough")
+                    .body(Body::from(r#"{"hello":"world"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -2710,24 +2919,24 @@ mod tests {
     }
 
     #[test]
-    fn authorization_bearer_header_can_supply_upstream_token() {
-        let backend = config::BackendConfig {
+    fn backend_bearer_token_uses_configured_key_and_never_client_credentials() {
+        let with_key = config::BackendConfig {
             name: "deepseek".to_owned(),
             kind: Some(config::BackendKind::Chat),
             endpoint: Some("http://127.0.0.1:9/chat/completions".to_owned()),
+            api_key: Some("backend-secret".to_owned()),
             profile: Some(config::ProfileKind::DeepSeek),
             ..config::BackendConfig::default()
         };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer client-token"),
-        );
+        assert_eq!(backend_bearer_token(&with_key), Some("backend-secret"));
 
-        assert_eq!(
-            upstream_bearer_token(&backend, &headers).unwrap(),
-            "client-token"
-        );
+        // A key-less backend (e.g. a default Ollama install) yields no token, so the proxy sends no
+        // Authorization header and never leaks the downstream client's credentials upstream.
+        let without_key = config::BackendConfig {
+            api_key: None,
+            ..with_key
+        };
+        assert_eq!(backend_bearer_token(&without_key), None);
     }
 
     #[tokio::test]
@@ -3095,9 +3304,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn messages_route_requires_backend_api_key_configuration() {
+    async fn messages_route_keyless_backend_sends_no_authorization_header() {
+        // A key-less chat backend (e.g. a default Ollama install) is valid: the proxy sends the
+        // request without an Authorization header rather than forwarding the client's credentials.
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header_is("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl_keyless",
+                "model": "deepseek-chat",
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "hi" },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
         let response = test_app_with_chat_backend(
-            "http://127.0.0.1:9/chat/completions".to_owned(),
+            format!("{}/chat/completions", upstream.uri()),
             None,
             None,
         )
@@ -3106,10 +3335,13 @@ mod tests {
                 .method("POST")
                 .uri("/v1/messages")
                 .header(CONTENT_TYPE, "application/json")
+                .header("x-api-key", "client-placeholder")
+                .header(AUTHORIZATION, "Bearer client-placeholder")
                 .body(Body::from(
                     json!({
                         "model": "deepseek-chat",
-                        "messages": [{ "role": "user", "content": "hello" }]
+                        "messages": [{ "role": "user", "content": "hello" }],
+                        "stream": false
                     })
                     .to_string(),
                 ))
@@ -3118,21 +3350,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(
-            value,
-            json!({
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": "configuration error: missing DEEPSEEK_API_KEY"
-                }
-            })
+        let requests = upstream.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].headers.get("authorization").is_none(),
+            "proxy must not forward the client's Authorization header to a key-less backend"
         );
+        assert!(requests[0].headers.get("x-api-key").is_none());
     }
 
     #[tokio::test]

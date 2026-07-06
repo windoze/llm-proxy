@@ -3,6 +3,8 @@
 // Later M6 route assembly wires this client into the Responses-to-Anthropic bridge.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::{
@@ -10,7 +12,7 @@ use crate::{
     provider::anthropic_cache::{
         AnthropicCacheControlInjection, prepare_anthropic_request_body_with_cache_control,
     },
-    provider::backend_request::{BackendRequestControls, BackendResponse},
+    provider::backend_request::{BackendRequestControls, BackendResponse, apply_backend_extras},
 };
 
 const X_API_KEY_HEADER: &str = "x-api-key";
@@ -26,6 +28,8 @@ pub struct AnthropicBackendClient {
     anthropic_version: String,
     cache_control: AnthropicCacheControlInjection,
     request_controls: BackendRequestControls,
+    additional_headers: BTreeMap<String, String>,
+    additional_query_params: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,7 +109,20 @@ impl AnthropicBackendClient {
             anthropic_version: anthropic_version.to_owned(),
             cache_control: AnthropicCacheControlInjection::Disabled,
             request_controls: BackendRequestControls::default(),
+            additional_headers: BTreeMap::new(),
+            additional_query_params: BTreeMap::new(),
         })
+    }
+
+    /// Sets backend-specific extra headers and query parameters attached to every request.
+    pub fn with_backend_extras(
+        mut self,
+        headers: BTreeMap<String, String>,
+        query: BTreeMap<String, String>,
+    ) -> Self {
+        self.additional_headers = headers;
+        self.additional_query_params = query;
+        self
     }
 
     /// Enables or disables stateless Anthropic prompt-cache breakpoint injection.
@@ -132,7 +149,13 @@ impl AnthropicBackendClient {
                     .http_client
                     .post(self.endpoint.clone())
                     .header(ANTHROPIC_VERSION_HEADER, &self.anthropic_version);
-                self.auth.apply(request).json(&body)
+                let request = self.auth.apply(request);
+                let request = apply_backend_extras(
+                    request,
+                    &self.additional_headers,
+                    &self.additional_query_params,
+                );
+                request.json(&body)
             })
             .await
     }
@@ -389,6 +412,54 @@ mod tests {
             request_body["messages"][2]["content"][0]["cache_control"],
             json!({ "type": "ephemeral" })
         );
+    }
+
+    #[tokio::test]
+    async fn attaches_additional_headers_and_query_params() {
+        use std::collections::BTreeMap;
+        use wiremock::matchers::query_param;
+
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-custom", "value"))
+            .and(query_param("api-version", "2024-02-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-5",
+                "content": [],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let mut headers = BTreeMap::new();
+        headers.insert("x-custom".to_owned(), "value".to_owned());
+        let mut query = BTreeMap::new();
+        query.insert("api-version".to_owned(), "2024-02-01".to_owned());
+
+        let client = AnthropicBackendClient::new(
+            format!("{}/v1/messages", upstream.uri()),
+            "sk-ant-key",
+            "2023-06-01",
+        )
+        .unwrap()
+        .with_backend_extras(headers, query);
+
+        client
+            .send(json!({
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 128,
+                "messages": []
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

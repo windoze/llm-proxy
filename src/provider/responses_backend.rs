@@ -3,11 +3,13 @@
 // The route layer uses this client for the rich Responses backend bridge.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::{
     error::{ProxyError, Result},
-    provider::backend_request::{BackendRequestControls, BackendResponse},
+    provider::backend_request::{BackendRequestControls, BackendResponse, apply_backend_extras},
 };
 
 const REQUIRED_REASONING_INCLUDE: &str = "reasoning.encrypted_content";
@@ -19,6 +21,8 @@ pub struct ResponsesBackendClient {
     endpoint: reqwest::Url,
     api_key: String,
     request_controls: BackendRequestControls,
+    additional_headers: BTreeMap<String, String>,
+    additional_query_params: BTreeMap<String, String>,
 }
 
 impl ResponsesBackendClient {
@@ -51,6 +55,8 @@ impl ResponsesBackendClient {
             endpoint,
             api_key: api_key.to_owned(),
             request_controls: BackendRequestControls::default(),
+            additional_headers: BTreeMap::new(),
+            additional_query_params: BTreeMap::new(),
         })
     }
 
@@ -60,15 +66,32 @@ impl ResponsesBackendClient {
         self
     }
 
+    /// Sets backend-specific extra headers and query parameters attached to every request.
+    pub fn with_backend_extras(
+        mut self,
+        headers: BTreeMap<String, String>,
+        query: BTreeMap<String, String>,
+    ) -> Self {
+        self.additional_headers = headers;
+        self.additional_query_params = query;
+        self
+    }
+
     /// Sends a Responses request and leaves the response body available as `bytes_stream()`.
     pub async fn send(&self, body: Value) -> Result<BackendResponse> {
         let body = prepare_responses_request_body(body)?;
         self.request_controls
             .send(|| {
-                self.http_client
+                let builder = self
+                    .http_client
                     .post(self.endpoint.clone())
-                    .bearer_auth(&self.api_key)
-                    .json(&body)
+                    .bearer_auth(&self.api_key);
+                let builder = apply_backend_extras(
+                    builder,
+                    &self.additional_headers,
+                    &self.additional_query_params,
+                );
+                builder.json(&body)
             })
             .await
     }
@@ -246,6 +269,36 @@ mod tests {
         let request_body: Value = requests[0].body_json().unwrap();
         assert_eq!(request_body["store"], json!(false));
         assert_eq!(request_body["include"], json!([REQUIRED_REASONING_INCLUDE]));
+    }
+
+    #[tokio::test]
+    async fn attaches_additional_headers_and_query_params() {
+        use wiremock::matchers::{header, query_param};
+
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("x-custom", "value"))
+            .and(query_param("api-version", "2024-02-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let mut headers = BTreeMap::new();
+        headers.insert("x-custom".to_owned(), "value".to_owned());
+        let mut query = BTreeMap::new();
+        query.insert("api-version".to_owned(), "2024-02-01".to_owned());
+
+        let client = ResponsesBackendClient::new(format!("{}/v1/responses", upstream.uri()), "key")
+            .unwrap()
+            .with_backend_extras(headers, query);
+        client
+            .send(json!({ "model": "gpt-5.1", "input": "hello" }))
+            .await
+            .unwrap();
+
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

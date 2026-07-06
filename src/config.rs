@@ -10,6 +10,8 @@ use crate::error::{ProxyError, Result};
 pub const CONFIG_PATH_ENV: &str = "LLM_PROXY_CONFIG";
 /// Environment variable overriding the HTTP listen address.
 pub const LISTEN_ADDR_ENV: &str = "LLM_PROXY_ADDR";
+/// Environment variable setting the optional proxy-level API key for downstream authentication.
+pub const API_KEY_ENV: &str = "LLM_PROXY_API_KEY";
 /// Default address used when neither a file nor the environment provides one.
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8080";
 /// Environment variable for the temporary byte-for-byte passthrough route.
@@ -68,6 +70,8 @@ const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 #[serde(default)]
 pub struct Config {
     pub listen_addr: String,
+    /// Optional proxy-level API key; when set, downstream clients must present it to authenticate.
+    pub api_key: Option<String>,
     pub passthrough_upstream_url: Option<String>,
     pub anthropic_default_max_tokens: Option<u32>,
     pub backends: Vec<BackendConfig>,
@@ -84,6 +88,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen_addr: DEFAULT_LISTEN_ADDR.to_owned(),
+            api_key: None,
             passthrough_upstream_url: None,
             anthropic_default_max_tokens: None,
             backends: Vec::new(),
@@ -170,6 +175,7 @@ impl Config {
 
     fn validate(&mut self) -> Result<()> {
         self.listen_addr = required_trimmed("listen_addr", &self.listen_addr)?;
+        self.api_key = normalize_optional_string(self.api_key.take());
         if self.anthropic_default_max_tokens == Some(0) {
             return Err(config_error(
                 "anthropic_default_max_tokens must be greater than zero",
@@ -240,6 +246,16 @@ pub struct BackendConfig {
     pub anthropic_version: Option<String>,
     pub default_model: Option<String>,
     pub default_max_tokens: Option<u32>,
+    /// Extra HTTP headers attached to every request sent to this backend.
+    #[serde(alias = "headers", skip_serializing_if = "BTreeMap::is_empty")]
+    pub additional_headers: BTreeMap<String, String>,
+    /// Extra query parameters attached to every request sent to this backend.
+    #[serde(
+        alias = "query",
+        alias = "query_params",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub additional_query_params: BTreeMap<String, String>,
 }
 
 impl BackendConfig {
@@ -333,6 +349,9 @@ impl BackendConfig {
                 self.name
             )));
         }
+
+        validate_additional_headers(&self.name, &self.additional_headers)?;
+        validate_additional_query_params(&self.name, &self.additional_query_params)?;
 
         Ok(())
     }
@@ -608,6 +627,9 @@ fn apply_env_overrides(config: &mut Config, env: &BTreeMap<String, String>) -> R
     if let Some(listen_addr) = env_value(env, LISTEN_ADDR_ENV) {
         config.listen_addr = listen_addr;
     }
+    if let Some(api_key) = env_value(env, API_KEY_ENV) {
+        config.api_key = Some(api_key);
+    }
     if let Some(upstream_url) = env_value(env, PASSTHROUGH_UPSTREAM_URL_ENV) {
         config.passthrough_upstream_url = Some(upstream_url);
     }
@@ -873,6 +895,39 @@ fn validate_route_override(label: &str, value: Option<&str>, allowed: &[&str]) -
             allowed.join(", ")
         )))
     }
+}
+
+fn validate_additional_headers(
+    backend: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<()> {
+    for (name, value) in headers {
+        reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+            config_error(format!(
+                "backend `{backend}` additional header name `{name}` is invalid: {err}"
+            ))
+        })?;
+        reqwest::header::HeaderValue::from_str(value).map_err(|err| {
+            config_error(format!(
+                "backend `{backend}` additional header `{name}` has an invalid value: {err}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_additional_query_params(
+    backend: &str,
+    params: &BTreeMap<String, String>,
+) -> Result<()> {
+    for name in params.keys() {
+        if name.trim().is_empty() {
+            return Err(config_error(format!(
+                "backend `{backend}` additional query parameter name must not be empty"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_url(label: impl AsRef<str>, value: &str) -> Result<()> {
@@ -1395,6 +1450,62 @@ min_switch_interval_ms = 15000
         .unwrap_err();
 
         assert!(err.to_string().contains("window_ms must be greater than zero"));
+    }
+
+    #[test]
+    fn toml_config_loads_proxy_api_key_and_backend_extras() {
+        let config = Config::from_toml_str(
+            r#"
+api_key = "  proxy-secret  "
+
+[[backends]]
+name = "azure"
+type = "responses"
+endpoint = "https://example.openai.azure.com/openai/responses"
+api_key = "azure-key"
+profile = "generic_open_ai"
+headers = { "x-custom" = "value" }
+query = { "api-version" = "2024-02-01" }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.api_key.as_deref(), Some("proxy-secret"));
+        let backend = config.backend("azure").unwrap();
+        assert_eq!(backend.additional_headers.get("x-custom").unwrap(), "value");
+        assert_eq!(
+            backend
+                .additional_query_params
+                .get("api-version")
+                .unwrap(),
+            "2024-02-01"
+        );
+    }
+
+    #[test]
+    fn env_overrides_proxy_api_key() {
+        let config = Config::load_with_env([(API_KEY_ENV, "env-proxy-key")]).unwrap();
+        assert_eq!(config.api_key.as_deref(), Some("env-proxy-key"));
+    }
+
+    #[test]
+    fn validation_rejects_invalid_additional_header_name() {
+        let err = Config::from_toml_str(
+            r#"
+[[backends]]
+name = "azure"
+type = "chat"
+base_url = "https://example.com"
+profile = "generic_open_ai"
+headers = { "bad header" = "value" }
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("additional header name `bad header` is invalid")
+        );
     }
 
     #[test]
