@@ -147,11 +147,7 @@ mod tests {
     #[test]
     fn snapshot_is_sorted_by_backend_name() {
         let registry = MetricsRegistry::with_backends(["zeta", "alpha", "mu"]);
-        let names: Vec<_> = registry
-            .snapshot()
-            .into_iter()
-            .map(|m| m.backend)
-            .collect();
+        let names: Vec<_> = registry.snapshot().into_iter().map(|m| m.backend).collect();
         assert_eq!(names, vec!["alpha", "mu", "zeta"]);
     }
 }

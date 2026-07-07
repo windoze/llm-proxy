@@ -1303,8 +1303,10 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_route_requires_proxy_api_key_when_configured() {
-        let app =
-            test_app_with_proxy_api_key("http://unused.example/chat/completions".to_owned(), "secret");
+        let app = test_app_with_proxy_api_key(
+            "http://unused.example/chat/completions".to_owned(),
+            "secret",
+        );
 
         // Missing credential is rejected.
         let response = app
@@ -1366,7 +1368,10 @@ mod tests {
 
     #[tokio::test]
     async fn health_route_open_without_proxy_api_key() {
-        let app = test_app_with_proxy_api_key("http://unused.example/chat/completions".to_owned(), "secret");
+        let app = test_app_with_proxy_api_key(
+            "http://unused.example/chat/completions".to_owned(),
+            "secret",
+        );
         let response = app
             .oneshot(
                 Request::builder()
@@ -1382,7 +1387,10 @@ mod tests {
 
     #[tokio::test]
     async fn messages_route_rejects_missing_and_wrong_proxy_api_key() {
-        let app = test_app_with_proxy_api_key("http://unused.example/chat/completions".to_owned(), "secret");
+        let app = test_app_with_proxy_api_key(
+            "http://unused.example/chat/completions".to_owned(),
+            "secret",
+        );
 
         // Missing credential.
         let response = app
@@ -3495,30 +3503,27 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let response = test_app_with_chat_backend(
-            format!("{}/chat/completions", upstream.uri()),
-            None,
-            None,
-        )
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/messages")
-                .header(CONTENT_TYPE, "application/json")
-                .header("x-api-key", "client-placeholder")
-                .header(AUTHORIZATION, "Bearer client-placeholder")
-                .body(Body::from(
-                    json!({
-                        "model": "deepseek-chat",
-                        "messages": [{ "role": "user", "content": "hello" }],
-                        "stream": false
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let response =
+            test_app_with_chat_backend(format!("{}/chat/completions", upstream.uri()), None, None)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/messages")
+                        .header(CONTENT_TYPE, "application/json")
+                        .header("x-api-key", "client-placeholder")
+                        .header(AUTHORIZATION, "Bearer client-placeholder")
+                        .body(Body::from(
+                            json!({
+                                "model": "deepseek-chat",
+                                "messages": [{ "role": "user", "content": "hello" }],
+                                "stream": false
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -3778,7 +3783,9 @@ mod tests {
         // Fallback always succeeds.
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("from fallback")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_success_body("from fallback")),
+            )
             .mount(&fallback)
             .await;
 
@@ -3830,7 +3837,9 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(chat_success_body("from fallback")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_success_body("from fallback")),
+            )
             .mount(&fallback)
             .await;
 

@@ -141,7 +141,11 @@ impl FailoverRegistry {
 mod tests {
     use super::*;
 
-    fn policy(window_ms: u64, failure_threshold: u32, min_switch_interval_ms: u64) -> FailoverPolicy {
+    fn policy(
+        window_ms: u64,
+        failure_threshold: u32,
+        min_switch_interval_ms: u64,
+    ) -> FailoverPolicy {
         FailoverPolicy {
             window_ms,
             failure_threshold,
@@ -156,7 +160,10 @@ mod tests {
 
         assert_eq!(state.record_failure(start), None);
         assert_eq!(state.current_index(), 0);
-        assert_eq!(state.record_failure(start + Duration::from_millis(10)), None);
+        assert_eq!(
+            state.record_failure(start + Duration::from_millis(10)),
+            None
+        );
         assert_eq!(
             state.record_failure(start + Duration::from_millis(20)),
             Some(1)
@@ -192,9 +199,15 @@ mod tests {
         let start = Instant::now();
 
         assert_eq!(state.record_failure(start), None);
-        assert_eq!(state.record_failure(start + Duration::from_millis(100)), None);
+        assert_eq!(
+            state.record_failure(start + Duration::from_millis(100)),
+            None
+        );
         // This failure is 2s after the first, which has aged out of the 1s window.
-        assert_eq!(state.record_failure(start + Duration::from_millis(2_000)), None);
+        assert_eq!(
+            state.record_failure(start + Duration::from_millis(2_000)),
+            None
+        );
         assert_eq!(state.current_index(), 0);
     }
 
@@ -205,8 +218,14 @@ mod tests {
 
         assert_eq!(state.record_failure(start), Some(1));
         // Already at the last target; further failures never advance.
-        assert_eq!(state.record_failure(start + Duration::from_millis(10)), None);
-        assert_eq!(state.record_failure(start + Duration::from_millis(20)), None);
+        assert_eq!(
+            state.record_failure(start + Duration::from_millis(10)),
+            None
+        );
+        assert_eq!(
+            state.record_failure(start + Duration::from_millis(20)),
+            None
+        );
         assert_eq!(state.current_index(), 1);
     }
 

@@ -441,7 +441,11 @@ pub struct ModelAlias {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub backend: String,
     /// Legacy single-target upstream model name; folded into `targets` during validation.
-    #[serde(alias = "rename", alias = "upstream_model", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        alias = "rename",
+        alias = "upstream_model",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub model: String,
     /// Ordered backend targets: index 0 is preferred, the rest are failover candidates.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -897,10 +901,7 @@ fn validate_route_override(label: &str, value: Option<&str>, allowed: &[&str]) -
     }
 }
 
-fn validate_additional_headers(
-    backend: &str,
-    headers: &BTreeMap<String, String>,
-) -> Result<()> {
+fn validate_additional_headers(backend: &str, headers: &BTreeMap<String, String>) -> Result<()> {
     for (name, value) in headers {
         reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
             config_error(format!(
@@ -1449,7 +1450,10 @@ min_switch_interval_ms = 15000
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("window_ms must be greater than zero"));
+        assert!(
+            err.to_string()
+                .contains("window_ms must be greater than zero")
+        );
     }
 
     #[test]
@@ -1474,10 +1478,7 @@ query = { "api-version" = "2024-02-01" }
         let backend = config.backend("azure").unwrap();
         assert_eq!(backend.additional_headers.get("x-custom").unwrap(), "value");
         assert_eq!(
-            backend
-                .additional_query_params
-                .get("api-version")
-                .unwrap(),
+            backend.additional_query_params.get("api-version").unwrap(),
             "2024-02-01"
         );
     }

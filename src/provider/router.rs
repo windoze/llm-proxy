@@ -166,7 +166,8 @@ impl ModelRouter {
                 target.backend
             ))
         })?;
-        let mut route = self.build_route(endpoint, requested_model, target.model.clone(), backend)?;
+        let mut route =
+            self.build_route(endpoint, requested_model, target.model.clone(), backend)?;
         if targets.len() > 1 {
             route.failover = Some(FailoverReport {
                 alias: requested_model.to_owned(),
@@ -316,7 +317,10 @@ impl<'a> ModelRoute<'a> {
         let Some(report) = self.failover.as_ref() else {
             return;
         };
-        if let Some(new_index) = report.registry.record_failure(&report.alias, Instant::now()) {
+        if let Some(new_index) = report
+            .registry
+            .record_failure(&report.alias, Instant::now())
+        {
             warn!(
                 alias = %report.alias,
                 from_index = report.active_index,
